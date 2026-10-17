@@ -31,7 +31,7 @@ The proposal's Narula et al. seed-warning citation points to [OpenReview](https:
 
 ## Hyperparameters: evidence versus inference
 
-There is no primary source establishing optimal LRs for this exact combination of checkpoints, heads, sample counts, task order and optimizer. The suite retains the methodology's nominal LRs as declared priors:
+There is no primary source establishing optimal LRs for this exact combination of checkpoints, heads, sample counts, task order and optimizer. The methodology's nominal LRs below remain the declared calibration/sanity priors. A subsequent 48-case training-holdout experiment supplied the [promoted project LoRA defaults](LORA_DEFAULTS.md); the historical priors are separate from those empirical choices:
 
 | Model | LoRA LR | Non-embedding full-FT LR |
 |---|---:|---:|
@@ -40,7 +40,7 @@ There is no primary source establishing optimal LRs for this exact combination o
 | Granite-3.3-2B | 1.60e-4 | 1.60e-5 |
 | Qwen2.5-3B | 1.50e-4 | 1.50e-5 |
 
-The proposed N^(-1/3) interpolation is an author-designed heuristic inspired by a few entries in [Brown et al.'s GPT-3 pretraining schedule, Table 2.1](https://arxiv.org/html/2005.14165v4). Pretraining is not classification fine-tuning. That table does not validate transferring this exponent to LoRA, distilled models or an 8-bit optimizer. The printed nominal rates above are authoritative; their rounding does not exactly reproduce the formula.
+The proposed N^(-1/3) interpolation is an author-designed heuristic inspired by a few entries in [Brown et al.'s GPT-3 pretraining schedule, Table 2.1](https://arxiv.org/html/2005.14165v4). Pretraining is not classification fine-tuning. That table does not validate transferring this exponent to LoRA, distilled models or an 8-bit optimizer. The printed nominal rates above define the original methodology priors; their rounding does not exactly reproduce the formula.
 
 [QLoRA](https://arxiv.org/abs/2305.14314) supplies useful precedent for adaptation LR scales, but uses quantized backbones and different data. Its reported rates do not establish an optimum for this unquantized experiment. Keep quantized model weights out of the main design.
 

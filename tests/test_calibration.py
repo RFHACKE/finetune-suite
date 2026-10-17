@@ -54,7 +54,8 @@ def synthetic_calibration(monkeypatch):
     def run(run, directory, data, tokenizer, mspec, **kwargs):
         assert kwargs['experiment'].mode == 'lr_test'
         calls.append(run)
-        ratio = run.lr / getattr(mspec, f'default_{run.track}_lr')
+        prior = config.METHODOLOGY_LORA_LR[run.model] if run.track == 'lora' else mspec.default_full_lr
+        ratio = run.lr / prior
         preferred = BEST_RATIO[run.model] if run.track == 'lora' else 2 / BEST_RATIO[run.model]
         # Keep the full-FT preferred rate inside the tested grid.
         preferred = min(preferred, 2)
@@ -93,7 +94,9 @@ def test_full_selection_saves_charts_defaults_and_resumes_without_retraining(tmp
     assert all(r.head_lr_multiplier == 5 for r in grid)
     for run in grid:
         ratio = BEST_RATIO[run.model] if run.track == 'lora' else min(2 / BEST_RATIO[run.model], 2)
-        assert run.lr == pytest.approx(ratio * getattr(config.MODELS[run.model], f'default_{run.track}_lr'))
+        prior = (config.METHODOLOGY_LORA_LR[run.model] if run.track == 'lora'
+                 else config.MODELS[run.model].default_full_lr)
+        assert run.lr == pytest.approx(ratio * prior)
     again = calibration.run_calibration(spec, device='cpu')
     assert again['completed'] == 0 and again['skipped'] == 88
     assert len(synthetic_calibration) == 88

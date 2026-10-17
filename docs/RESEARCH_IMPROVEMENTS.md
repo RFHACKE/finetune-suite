@@ -2,6 +2,8 @@
 
 Extracted from the [full literature review](literature-review.md), reviewed 17 October 2026. A Word copy can be generated locally using the [build instructions](LITERATURE_SEARCH.md#rebuilding-the-documents) and is excluded from Git. The four selected base models remain fixed. Selected measurement and LR/head-calibration proposals are implemented in [frw-v3](PROTOCOL_V3.md); the remaining entries are optional proposals. New/Extend statuses describe the reviewed v2 baseline.
 
+Update, 18 October 2026: real LoRA calibration has completed and its selected LR/head pairs are now [project defaults](LORA_DEFAULTS.md). Candidate tables below retain the original literature-review priors and search design for historical context; they are not the current main-run LoRA defaults.
+
 Priority P1 means the best return for this FYP; P2 means a targeted follow-up after the core design is sound; P3 means optional future work. “New” identifies work absent from the reviewed v2 baseline. “Extend” means that baseline already supplies part of the measurement. The subsequent v3 implementation is identified in the executive assessment and protocol amendment. These are design recommendations and candidate values, not claims of demonstrated improvement.
 
 Cost categories refer to additional work: CPU means analysis of already saved artifacts; evaluation means additional forward passes; calibration means isolated training-only checks; cohort means additional experimental training. Actual dollars require measured timings and the current rental quote. Preserve existing primary outcomes even when adding richer secondary measurements.

@@ -1,8 +1,16 @@
 # Validation record
 
+## Promoted LoRA defaults — 18 October 2026
+
+The user requested promoting the four completed calibration selections into project defaults. Fresh CLI plans now resolve LoRA LR/head pairs `4.00e-4 × 5`, `1.85e-4 × 1`, `3.20e-4 × 5`, and `3.00e-4 × 5` in registry order. [LORA_DEFAULTS.md](LORA_DEFAULTS.md) and its JSON provenance summary retain the measured controls, report checksums and limitations. Full-FT priors and the original calibration/sanity LR grids are preserved separately.
+
+The complete CPU regression run passed **63 tests**, with **six CUDA cases skipped**, in 145.72 seconds. New checks validate empirical policy resolution, priority of cohort/explicit overrides, original candidate grids and the fifteen-case sanity battery. Existing calibration, metrics, analysis, tiny-model training and checkpoint-recovery tests pass. Ruff and whitespace checks passed. A real CLI plan resolved the expanded 140-run LoRA grid with all four promoted policies.
+
+The changed project source correctly rejects the old cohort's calibration context. The prepared frozen checkout at `3408ffb` successfully validates that original context and constructs all 140 sequences with the already-selected LR/head policies. The running cloud image and preserved source remain at their original fingerprint; no cloud redeployment, additional GPU training or final experimental analysis was started for this update. Use [OVERNIGHT.md](OVERNIGHT.md) for the original cohort's deferred analysis commands.
+
 ## Modal preservation update — 18 October 2026
 
-Real LoRA-only LR/head calibration has now completed all 48 planned cases for the four pinned models. The expanded 140-sequence main cohort is running on four L40S workers; it is not yet a completed scientific result. The scientific package remains frozen at SHA-256 `ff3d682687b8ca5db927a383539cf816691c06a647c96c7b2750048f14d3fb16`. Production full-FT calibration/baselines are outside this requested cloud cohort.
+Real LoRA-only LR/head calibration has now completed all 48 planned cases for the four pinned models. The expanded 140-sequence main cohort is running on four L40S workers; it is not yet a completed scientific result. The cloud cohort's scientific package remains frozen at SHA-256 `ff3d682687b8ca5db927a383539cf816691c06a647c96c7b2750048f14d3fb16`. Production full-FT calibration/baselines are outside this requested cloud cohort.
 
 The private CPU-only preservation observer has been deployed and started from a client that exits immediately. Its first durable remote inventory, failure records, retry candidates and source manifest have been retrieved successfully. All four pretrained projection caches were checked for remote presence. The preservation checks also passed against 15 actual completed local run exports. The cloud training coordinator and archive packager continued after their local CLI clients were disconnected. Local collection, spectral analysis and finalization are paused until the user returns; the temporary download endpoint is stopped.
 

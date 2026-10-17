@@ -1,8 +1,8 @@
 """Fixed four-model registry and protocol-v3 controls.
 
-The nominal model-specific LRs retain methodology v1.1's printed values as
-heuristic priors, not proven size-transfer laws. See docs/LITERATURE_REVIEW.md
-and docs/PROTOCOL_V3.md for source checks, calibration and numerical amendments.
+Project LoRA defaults use the best tested LR/head policies from the 48-case
+Modal calibration. Methodology v1.1's rates remain the declared calibration
+and sanity-check priors. See docs/LORA_DEFAULTS.md and docs/PROTOCOL_V3.md.
 """
 
 from __future__ import annotations
@@ -102,14 +102,29 @@ def lora_lr_rule(params_total_b: float) -> float:
     return 2e-4 * (1.24 / params_total_b) ** (1.0 / 3.0)
 
 
-# Pre-registered values as printed in methodology Sec. 2.2 (authoritative).
-DEFAULT_LORA_LR = {
+# Original methodology values keep the registered calibration/sanity grids stable.
+METHODOLOGY_LORA_LR = {
     "llama3.2-1b": 2.00e-4,
     "qwen2.5-1.5b": 1.85e-4,
     "granite3.3-2b": 1.60e-4,
     "qwen2.5-3b": 1.50e-4,
 }
-# Full fine-tuning: one order of magnitude below LoRA (Biderman et al. 2024).
+# Promoted from the completed 2026-10-18 LoRA-only calibration, jointly with
+# classifier-head ratios. See docs/calibrated-lora-defaults.json for provenance.
+DEFAULT_LORA_LR = {
+    "llama3.2-1b": 4.00e-4,
+    "qwen2.5-1.5b": 1.85e-4,
+    "granite3.3-2b": 3.20e-4,
+    "qwen2.5-3b": 3.00e-4,
+}
+DEFAULT_LORA_HEAD_MULTIPLIER = {
+    "llama3.2-1b": 5.0,
+    "qwen2.5-1.5b": 1.0,
+    "granite3.3-2b": 5.0,
+    "qwen2.5-3b": 5.0,
+}
+# Full-FT priors were not calibrated by that LoRA-only experiment. Retain the
+# original values (one tenth of the methodology's original LoRA priors).
 DEFAULT_FULL_LR = {"llama3.2-1b": 2e-5, "qwen2.5-1.5b": 1.85e-5,
                    "granite3.3-2b": 1.6e-5, "qwen2.5-3b": 1.5e-5}
 
@@ -237,8 +252,8 @@ class ExperimentSpec:
     reserve: float = 0.0
     max_hours: Optional[float] = None
     fail_fast: bool = True
-    head_lr_multiplier: Optional[float] = None  # explicit override; otherwise calibrated or 1
-    calibrated_defaults: Optional[dict] = None  # loaded from this output cohort, never source edits
+    head_lr_multiplier: Optional[float] = None  # explicit > cohort policy > project track default
+    calibrated_defaults: Optional[dict] = None  # validated output-cohort overrides
 
     def __post_init__(self):
         if not self.models or any(m not in MODELS for m in self.models):
@@ -304,7 +319,8 @@ class ExperimentSpec:
     def resolved_head_multiplier(self, model_key: str, track: str) -> float:
         if self.head_lr_multiplier is not None:
             return self.head_lr_multiplier
-        return (self.calibrated_defaults or {}).get(model_key, {}).get(track, {}).get("head_lr_multiplier", 1.0)
+        fallback = DEFAULT_LORA_HEAD_MULTIPLIER[model_key] if track == "lora" else 1.0
+        return (self.calibrated_defaults or {}).get(model_key, {}).get(track, {}).get("head_lr_multiplier", fallback)
 
     def default_policy(self) -> dict:
         return {m: {t: {"lr": self.default_lr(m, t),

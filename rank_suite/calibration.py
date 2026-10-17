@@ -47,7 +47,8 @@ def make_plan(spec, seeds=(42, 123)):
             if spec.track not in ('both', track):
                 continue
             explicit = spec.lora_lrs if track == 'lora' else spec.full_lrs
-            prior = getattr(config.MODELS[model], f'default_{track}_lr')
+            prior = (config.METHODOLOGY_LORA_LR[model] if track == 'lora'
+                     else config.MODELS[model].default_full_lr)
             rates = sorted(set(explicit[model] if explicit and explicit.get(model)
                                else [prior * factor for factor in (.5, 1, 2)]))
             if len(rates) < 2:

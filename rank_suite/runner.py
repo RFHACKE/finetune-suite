@@ -25,7 +25,7 @@ def build_grid(spec):
         m = config.MODELS[model]
         if spec.mode == "sanity":
             if spec.track in ("lora", "both"):
-                for lr in sorted({m.default_lora_lr, config.SANITY_COMPARISON_LR}):
+                for lr in sorted({config.METHODOLOGY_LORA_LR[model], config.SANITY_COMPARISON_LR}):
                     add(model, "lora", 16, lr, 42, task_keys=("rte",), mode="sanity")
             if spec.track in ("full", "both"):
                 for lr in (m.default_full_lr, 2 * m.default_full_lr):
@@ -202,7 +202,7 @@ def sanity_checks(root, spec):
     checks = []
     for key in spec.models:
         m = config.MODELS[key]
-        for track, expected in (("lora", {m.default_lora_lr, config.SANITY_COMPARISON_LR}),
+        for track, expected in (("lora", {config.METHODOLOGY_LORA_LR[key], config.SANITY_COMPARISON_LR}),
                                 ("full", {m.default_full_lr, 2 * m.default_full_lr})):
             if spec.track not in ("both", track):
                 continue

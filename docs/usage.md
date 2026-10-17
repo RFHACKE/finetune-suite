@@ -85,16 +85,18 @@ Completed pilots are reused by `main` with the same output and controls. Smoke a
 
 ## 3. Select models, tracks, ranks, and seeds
 
-| Model key | Exact checkpoint | Nominal LoRA LR | Nominal full-FT LR |
-|---|---|---:|---:|
-| `llama3.2-1b` | `meta-llama/Llama-3.2-1B` | `2.00e-4` | `2.00e-5` |
-| `qwen2.5-1.5b` | `Qwen/Qwen2.5-1.5B` | `1.85e-4` | `1.85e-5` |
-| `granite3.3-2b` | `ibm-granite/granite-3.3-2b-base` | `1.60e-4` | `1.60e-5` |
-| `qwen2.5-3b` | `Qwen/Qwen2.5-3B` | `1.50e-4` | `1.50e-5` |
+| Model key | Exact checkpoint | Default LoRA LR | LoRA head multiplier | Full-FT prior |
+|---|---|---:|---:|---:|
+| `llama3.2-1b` | `meta-llama/Llama-3.2-1B` | `4.00e-4` | `5` | `2.00e-5` |
+| `qwen2.5-1.5b` | `Qwen/Qwen2.5-1.5B` | `1.85e-4` | `1` | `1.85e-5` |
+| `granite3.3-2b` | `ibm-granite/granite-3.3-2b-base` | `3.20e-4` | `5` | `1.60e-5` |
+| `qwen2.5-3b` | `Qwen/Qwen2.5-3B` | `3.00e-4` | `5` | `1.50e-5` |
 
 `--models` accepts these keys or exact checkpoint IDs, separated by spaces. Other checkpoints are rejected. `--track` accepts `lora`, `full`, or `both` (default).
 
-The table contains fallback research priors. After a completed `--test-lr`, `plan` and `run` automatically use the selected rates in `<output>/lr_defaults.json`. `list-models` continues to show registry priors. Main analysis anchors full-FT comparisons to the frozen selected baseline, without selecting its LR from main validation outcomes.
+The LoRA LR/head pairs are project defaults promoted from the completed 48-case Modal calibration. They are the best tested training-holdout settings, with upper-grid-boundary selections for Llama, Granite and Qwen3B. The measured partition was micro-batch 16/accumulation 1; the ordinary CLI remains 4/4 unless those flags are supplied. Full-FT values remain uncalibrated priors with head multiplier 1. See [LORA_DEFAULTS.md](LORA_DEFAULTS.md) and its checksummed evidence summary.
+
+After a completed `--test-lr`, `plan` and `run` use valid selected rates/head ratios in `<output>/lr_defaults.json` ahead of these project defaults. Explicit CLI rates/head ratios take precedence. `list-models` shows registry rates and LoRA head ratios. Main analysis anchors full-FT comparisons to the frozen selected baseline, without selecting its LR from main validation outcomes. Existing Modal results use their [frozen source checkout](OVERNIGHT.md); this defaults promotion does not rewrite old calibration fingerprints.
 
 ```bash
 # One model's complete rank sweep and baseline.
@@ -124,7 +126,7 @@ Main defaults are ranks `4 8 16 32 64` and seeds `42 123 456 789 1024`. Subsets 
 | `--deterministic` | Off | Requests strict deterministic algorithms; keep the policy fixed within a cohort. |
 | `--save-full-weights` | Off | Also retains full-FT backbone weights at every boundary; substantial disk use. Exact q/v snapshots are always saved. |
 | `--lora-lrs` / `--full-lrs` | Model defaults above | Explicit sensitivity rates, either common or model-specific. |
-| `--head-lr-multiplier` | Calibrated value, otherwise `1` | Positive finite head/backbone LR ratio. An explicit value overrides the selected head ratio and must be fixed before main training. |
+| `--head-lr-multiplier` | Cohort value, otherwise Section 3's LoRA ratio; full FT uses `1` | Positive finite head/backbone LR ratio. An explicit value overrides the selected head ratio and must be fixed before main training. |
 
 Plan a different batch partition before starting its own cohort:
 
@@ -332,14 +334,14 @@ Every option in this table is accepted by both commands. `plan` validates config
 | Option and value | Effective default | Meaning, accepted values, and constraints |
 |---|---|---|
 | `--test-lr` | Off | Select LR/head defaults on training-only holdouts, save JSON/charts, and exit without main training. `plan --test-lr` prints the calibration plan. Shortcut: `./run.sh --test-lr`. See Section 13 for the selection rule and option interactions. |
-| `--head-lr-multiplier MULTIPLIER` | Calibrated value, otherwise `1` | Finite positive classifier-head/backbone LR ratio. Examples: `--head-lr-multiplier 5`; `run --test-lr --head-lr-multiplier 1` searches LRs with the head ratio fixed instead of searching `{1,5}`. |
+| `--head-lr-multiplier MULTIPLIER` | Cohort ratio, otherwise Section 3's model-specific LoRA ratio; full FT uses `1`. | Finite positive classifier-head/backbone LR ratio. Explicit values override all selected tracks/models. Examples: `--head-lr-multiplier 5`; `run --test-lr --head-lr-multiplier 1` searches LRs with the head ratio fixed instead of searching `{1,5}`. |
 | `--models MODEL ...` | All four fixed models. | Registry keys or exact checkpoint IDs from Section 3, separated by spaces. Duplicates are removed. Other checkpoints are rejected. Example: `--models llama3.2-1b qwen2.5-3b`. |
 | `--output PATH` | `results` | Experiment directory. Relative paths resolve from the repository directory because the launcher changes there. Absolute paths are accepted, for example `--output /workspace/fyp-results`. Main/pilot use it directly; smoke/sanity append their own subdirectory. |
 | `--track TRACK` | `both` | Choose `lora`, `full`, or `both`. `full` means all non-embedding backbone weights plus the current task head; token embeddings stay frozen. Ranks apply to LoRA only. |
 | `--mode MODE` | `main` | Choose `main`, `pilot`, `sanity`, or `smoke`. Pilot/smoke force rank 16 and seed 42. Sanity additionally forces its preset LR comparisons and RTE training holdout. See Section 2 for data, epoch, and output differences. |
 | `--ranks RANK ...` | `4 8 16 32 64` | Positive integers, separated by spaces or commas; duplicates are removed. A rank cannot exceed the smallest `v_proj` output width among selected models: 256 when either Qwen is selected, 512 for a Llama/Granite-only selection. Other valid ranks are sensitivity experiments; the main window requires the prescribed grid. Pilot/smoke/sanity use rank 16 instead. |
 | `--seeds SEED ...` | `42 123 456 789 1024` | Integers from `0` through `4294967295`, separated by spaces or commas; main-grid duplicates are removed. Pilot/smoke/sanity use seed 42 instead. The main window requires the five prescribed seeds. |
-| `--lora-lrs RATE ...` | Calibrated cohort rate, otherwise the Section 3 prior. | Finite positive rates, using decimal or scientific notation. Supply a common list (`--lora-lrs 1e-4 2e-4`) or scoped lists (`--lora-lrs qwen2.5-1.5b=1e-4,1.85e-4`). Scoped names must be selected registry keys, even if `--models` uses exact checkpoint IDs. Sanity uses its preset comparisons instead. |
+| `--lora-lrs RATE ...` | Calibrated cohort rate, otherwise the Section 3 project default. | Finite positive rates, using decimal or scientific notation. Supply a common list (`--lora-lrs 1e-4 2e-4`) or scoped lists (`--lora-lrs qwen2.5-1.5b=1e-4,1.85e-4`). Scoped names must be selected registry keys, even if `--models` uses exact checkpoint IDs. Sanity uses its original methodology comparisons instead. |
 | `--full-lrs RATE ...` | Calibrated cohort rate, otherwise the Section 3 prior. | Same syntax and positivity rules as `--lora-lrs`, for the full track. A model's nominal rate must be present to provide the required window baseline. Example: `--full-lrs qwen2.5-1.5b=1e-5,1.85e-5`. Sanity uses nominal and twice-nominal rates instead. |
 | `--optimizer POLICY` | `standard` | `standard`: fp32 AdamW moments for LoRA, 8-bit dense-matrix moments with fp32 head/vector overrides for full FT. `adamw`: fp32 moments in both tracks. A changed policy requires a separate output cohort. This option does not quantize model weights. |
 | `--micro-batch N` | `4` | Positive integer divisor of 16: `1`, `2`, `4`, `8`, or `16`. Used for all tracks/ranks in the cohort. A changed partition requires a new output directory. |
@@ -423,7 +425,7 @@ Also accepts `-h` and `--help`. GPU checks require exactly one visible GPU and n
 
 <!-- cli-options: list-models -->
 
-Only `-h` and `--help` are accepted. `./run.sh list-models` prints all fixed registry entries, licenses, nominal LRs, default ranks, and default seeds. It accepts no model filter or output-directory option.
+Only `-h` and `--help` are accepted. `./run.sh list-models` prints all fixed registry entries, licenses, project LRs, LoRA head ratios, default ranks, and default seeds. It accepts no model filter or output-directory option.
 
 ## 12. Related launcher options and environment variables
 
@@ -458,7 +460,7 @@ Run this **before the first main/pilot launch** in a fresh output directory:
 
 The bounded search follows this declared procedure:
 
-1. For each selected model and track, test `{0.5,1,2}` times its Section 3 prior, with classifier-head LR multipliers `{1,5}`. Use rank 16 for LoRA, three epochs, and seed 42. Screening trains on 1,992 RTE training examples and evaluates the disjoint, stratified 498-example training holdout.
+1. For each selected model and track, test `{0.5,1,2}` times its original methodology prior, with classifier-head LR multipliers `{1,5}`. The [registered grids](PROTOCOL_V3.md#evidence-and-candidate-grid) retain their original centers after the project default promotion. Use rank 16 for LoRA, three epochs, and seed 42. Screening trains on 1,992 RTE training examples and evaluates the disjoint, stratified 498-example training holdout.
 2. Keep the best head multiplier for each LR, then the two best **distinct rates**. Screening orders accuracy first, then lower NLL, lower LR and lower head multiplier.
 3. Train each finalist from the pinned base through RTE → MNLI → SST-2 at seeds 42 and 123. Each task uses its own fixed 80/20 split inside its 2,490 training examples. Evaluate all previously learned tasks after each boundary. The official validation sets never participate in selection.
 4. A candidate is eligible only when its mean diagonal accuracy exceeds the holdout majority baseline on **every task**. Select the highest mean final-row accuracy across tasks and seeds; ties use higher mean diagonal, lower mean final NLL, lower LR, then lower head multiplier. BWT, individual seed scores and sample SD remain visible.
@@ -512,7 +514,7 @@ results-v3/
 
 Re-running the same `--test-lr` resumes its completed cases. Repeats of an activated selection write a new report identity, preserving the previous active evidence until replacement succeeds. `./run.sh analyze --output results-v3` can regenerate the latest calibration charts on CPU, even before main results exist. Calibration cases are always excluded from main aggregation, completeness counts and spectral passes.
 
-Selected defaults are **local to the output cohort**, so subsequent `plan`, `run` and parallel workers using that `--output` load them automatically. Preserve `lr_defaults.json` together with `lr_test/`; matching completed evidence and code/training controls are validated. Explicit main LR lists are sensitivity settings; they do not change the declared baseline anchor. Defaults cannot be retuned after main/pilot controls are written. Use a new output root for a new calibration policy or scientific/numerical cohort.
+New `--test-lr` selections are **local to the output cohort**, so subsequent `plan`, `run` and parallel workers using that `--output` load them automatically. The 18 October 2026 LoRA policies were separately promoted to the project defaults in Section 3 at the user's request. Preserve `lr_defaults.json` together with `lr_test/`; matching completed evidence and code/training controls are validated. Explicit main LR lists are sensitivity settings; they do not change the declared baseline anchor. Defaults cannot be retuned after main/pilot controls are written. Use a new output root for a new calibration policy or scientific/numerical cohort.
 
 ## 14. New measurement outputs
 

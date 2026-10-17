@@ -54,7 +54,18 @@ Read `results-v3/aggregates/completeness.json` and `results-v3/analysis/report.m
 
 ## Numerical and reproducibility choices
 
-Trainable parameters are fp32 with bf16 autocast computation; normalization storage is fp32 in both tracks. LoRA uses fp32 AdamW moments. Full FT uses 8-bit moments for dense matrices and fp32 moments for heads and vectors; a uniform fp32-state robustness cohort is available. Model weights are never quantized. LoRA targets q/v, alpha=2r, dropout=0. Fallback LoRA LRs are 2.00e-4 / 1.85e-4 / 1.60e-4 / 1.50e-4, with fallback full-FT rates ten times smaller. `--test-lr` replaces these priors with the best tested model/track rates and head multipliers for that output cohort; one LoRA rate remains fixed across main ranks.
+Trainable parameters are fp32 with bf16 autocast computation; normalization storage is fp32 in both tracks. LoRA uses fp32 AdamW moments. Full FT uses 8-bit moments for dense matrices and fp32 moments for heads and vectors; a uniform fp32-state robustness cohort is available. Model weights are never quantized. LoRA targets q/v, alpha=2r, dropout=0.
+
+The completed 48-case Modal calibration supplies the project LoRA defaults:
+
+| Model | Adapter LR | Head LR multiplier |
+| --- | ---: | ---: |
+| Llama-3.2-1B | `4.00e-4` | `5` |
+| Qwen2.5-1.5B | `1.85e-4` | `1` |
+| Granite-3.3-2B | `3.20e-4` | `5` |
+| Qwen2.5-3B | `3.00e-4` | `5` |
+
+These are the best tested training-holdout policies; three models selected the upper tested LR boundary. They apply automatically in fresh output directories. See [calibration evidence, limitations and precedence](docs/LORA_DEFAULTS.md). The measured LoRA partition was micro-batch 16/accumulation 1; pass those values explicitly to reproduce it. Full-FT priors remain `2.00e-5 / 1.85e-5 / 1.60e-5 / 1.50e-5`. A valid cohort-local `--test-lr` result overrides the project defaults, and explicit CLI choices override the resolved rates/head ratios. The registered calibration and sanity candidate grids retain their original methodology priors.
 
 Model/tokenizer/data revisions, protocol, source hashes, package freeze and hardware are recorded. Changed scientific controls or software require a new results directory. Each model's rank/baseline comparisons must use the same GPU type. Older protocol cohorts are not pooled with v3.
 
@@ -67,6 +78,7 @@ Model/tokenizer/data revisions, protocol, source hashes, package freeze and hard
 - [Current v3 protocol and LR selection](docs/PROTOCOL_V3.md)
 - [Cloud and budget runbook](docs/CLOUD_RUNBOOK.md)
 - [Modal execution and lossless retrieval](docs/MODAL_EXECUTION.md)
+- [Calibrated project LoRA defaults and their evidence](docs/LORA_DEFAULTS.md)
 - [Unattended run, remote failure reports and morning recovery](docs/OVERNIGHT.md)
 - [Validation record and measured CPU spectral timings](docs/VALIDATION.md)
 - [CLI usage](docs/usage.md)

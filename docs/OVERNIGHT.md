@@ -2,6 +2,8 @@
 
 The running cohort is `frw-20261018` in Modal workspace `rajafasi01010`. It contains four fixed models × seven LoRA ranks (4, 8, 16, 32, 64, 128, 256) × five seeds (42, 123, 456, 789, 1024): **140 sequences**. The 48-case LR/head calibration has already finished. Scientific training controls and the selected defaults remain frozen.
 
+The selected LoRA policies have subsequently been [promoted to project defaults](LORA_DEFAULTS.md) for future outputs. That code change has a new source fingerprint. The running cloud image retains the original source; use the pinned checkout described below for this cohort's CPU analysis, finalization and any failed-run recovery. Keep its saved defaults and original fingerprints intact.
+
 Training runs under a detached remote CPU coordinator. Closing this conversation, sleeping the local computer, losing the local connection, or exhausting Codex quota does not stop those remote workers. GPU containers exit when their model's assigned runs finish. The existing coordinator retains the $28 aggregate main-stage guard and six-hour worker timeouts; calibration had a separate $6 allowance. The approved overall spending envelope is $35, including preparation and CPU services. These guards are conservative resource estimates, rather than an account-wide billing lock. Billing delays, resource prices and continuing storage charges still matter.
 
 CPU spectral analysis and final scientific analysis are **deferred until the user returns**. Previously computed local spectral caches are retained. There are no automatic training retries and no external messages. The temporary archive download endpoint was stopped before leaving the experiments unattended.
@@ -57,17 +59,23 @@ The collector verifies the downloaded archive SHA-256 and saved projection hashe
 
 Ordinary authenticated SDK downloads require no public endpoint. If their throughput is inadequate, the previously authorized temporary token-protected stream can be redeployed using [MODAL_EXECUTION.md](MODAL_EXECUTION.md). Stop it again after retrieval. Starting a stream is optional and is not part of the unattended observer.
 
-After verified retrieval, use the suite CPU environment:
+After verified retrieval, use the suite CPU environment with the **original scientific source**. A complete frozen checkout was prepared in `Finetune-result/execution/frozen-checkout/` before the project-default promotion. The following commands recreate it from the published commit when absent, then use it for analysis:
 
 ```bash
 ./setup.sh --cpu
-./run.sh intruders --output Finetune-result --threads 4
-python -m tools.audit_requested_results --root Finetune-result
+FYP_RESULT_ROOT="$PWD/Finetune-result"
+FYP_CPU_PYTHON="$PWD/.venv/bin/python"
+if [ ! -f "$FYP_RESULT_ROOT/execution/frozen-checkout/.git" ]; then
+  git worktree add --detach "$FYP_RESULT_ROOT/execution/frozen-checkout" 3408ffb11bcae1a3bb8919a3edcbbfd661dafc58
+fi
+cd "$FYP_RESULT_ROOT/execution/frozen-checkout"
+"$FYP_CPU_PYTHON" -m rank_suite.cli intruders --output "$FYP_RESULT_ROOT" --threads 4
+"$FYP_CPU_PYTHON" -m tools.audit_requested_results --root "$FYP_RESULT_ROOT"
 # Only after all 140 runs and their CPU spectra pass verification:
-python -m tools.finalize_collected_results --root Finetune-result
+"$FYP_CPU_PYTHON" -m tools.finalize_collected_results --root "$FYP_RESULT_ROOT"
 ```
 
-Use the same activated Python environment for the last two commands, for example `.venv/bin/python`. Spectral analysis resumes its existing per-matrix cache. The finalizer refuses to produce a complete final delivery when the exact requested cohort, exported evidence, source checks or spectra are incomplete. It then generates aggregate tables, charts, a report and a complete local artifact checksum manifest. The requested LoRA-only cohort cannot establish full-FT-baseline-dependent feasible windows.
+The pinned checkout's scientific SHA-256 is `ff3d682687b8ca5db927a383539cf816691c06a647c96c7b2750048f14d3fb16`. It already loads the selected LoRA rates from the preserved cohort defaults when given this absolute result root. Setting an explicit Python path keeps the CPU environment available after changing directories. Spectral analysis resumes its existing per-matrix cache. The finalizer refuses to produce a complete final delivery when the exact requested cohort, exported evidence, source checks or spectra are incomplete. It then generates aggregate tables, charts, a report and a complete local artifact checksum manifest. The requested LoRA-only cohort cannot establish full-FT-baseline-dependent feasible windows.
 
 If any sequences failed, retain all successful results and review `retry-plan.json` and the original worker logs before allocating more GPU time. Recovery must use the same source, protocol, model/data revisions and activated LR/head policy. Completed identities should be skipped and the last valid task checkpoint reused where possible. No recovery run is launched overnight.
 

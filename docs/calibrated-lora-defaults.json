@@ -1,0 +1,120 @@
+{
+  "schema": "frw-promoted-lora-defaults-v1",
+  "calibration_date": "2026-10-18",
+  "source_cohort": "frw-20261018",
+  "frozen_source_git_commit": "3408ffb11bcae1a3bb8919a3edcbbfd661dafc58",
+  "context": {
+    "accum": 1,
+    "data_revision": "bcdcba79d07bc864c1c254ccfcedcce55bcc9a8c",
+    "deterministic": false,
+    "encoding": "labelled-pairs-v2",
+    "epochs": 3,
+    "eval_batch": 32,
+    "max_len": 256,
+    "micro_batch": 16,
+    "models": {
+      "granite3.3-2b": "c15dc681f4b2aeb4e576cdaae5434edfc17ed14d",
+      "llama3.2-1b": "4e20de362430cd3b72f300e6b0f18e50e7166e08",
+      "qwen2.5-1.5b": "8faed761d45a263340a0528343f099c05c9a4323",
+      "qwen2.5-3b": "3aab1f1954e9cc14eb9509a215f9e5ca08227a9b"
+    },
+    "optimizer": "standard",
+    "protocol": "frw-v3",
+    "source_sha256": "ff3d682687b8ca5db927a383539cf816691c06a647c96c7b2750048f14d3fb16",
+    "train_samples": 2490
+  },
+  "selection_scope": "LoRA only; best eligible tested LR/head policy per model, fixed across main ranks.",
+  "selection_rule": "RTE training-holdout screen; two distinct LR finalists confirmed on RTE/MNLI/SST-2 at seeds 42 and 123; eligible mean diagonals exceed each holdout majority baseline; maximize mean final-row accuracy, then diagonal accuracy, lower NLL, lower LR and lower head multiplier.",
+  "training_holdout": {
+    "source_training_examples_per_task": 2490,
+    "fit": 1992,
+    "holdout": 498,
+    "data_seed": 42,
+    "uses_official_validation": false
+  },
+  "confirmation_seeds": [
+    42,
+    123
+  ],
+  "endpoint_ranks": [
+    4,
+    256
+  ],
+  "completed_calibration_cases": 48,
+  "gpu": "NVIDIA L40S",
+  "models": {
+    "llama3.2-1b": {
+      "calibration_id": "017702b50e44a6705a9c",
+      "head_lr_multiplier": 5.0,
+      "lr": 0.0004,
+      "model_revision": "4e20de362430cd3b72f300e6b0f18e50e7166e08",
+      "tested_rates": [
+        0.0001,
+        0.0002,
+        0.0004
+      ],
+      "upper_search_boundary": true,
+      "completed_cases": 12,
+      "report_relative_path": "lr_test/experiments/017702b50e44a6705a9c/report.json",
+      "report_sha256": "acafca25ddf47ac4c8e2ad5f9c24a91650b75e648c93c114da7c6a0a25659fee"
+    },
+    "qwen2.5-1.5b": {
+      "calibration_id": "92621926b3687e496fd1",
+      "head_lr_multiplier": 1.0,
+      "lr": 0.000185,
+      "model_revision": "8faed761d45a263340a0528343f099c05c9a4323",
+      "tested_rates": [
+        9.25e-05,
+        0.000185,
+        0.00037
+      ],
+      "upper_search_boundary": false,
+      "completed_cases": 12,
+      "report_relative_path": "lr_test/experiments/92621926b3687e496fd1/report.json",
+      "report_sha256": "9e77bff6ccbbab99c3ef8e09a38ca644b740173c7baebbbfc6c568b55eb8feff"
+    },
+    "granite3.3-2b": {
+      "calibration_id": "c3576534f52afe39c1db",
+      "head_lr_multiplier": 5.0,
+      "lr": 0.00032,
+      "model_revision": "c15dc681f4b2aeb4e576cdaae5434edfc17ed14d",
+      "tested_rates": [
+        8e-05,
+        0.00016,
+        0.00032
+      ],
+      "upper_search_boundary": true,
+      "completed_cases": 12,
+      "report_relative_path": "lr_test/experiments/c3576534f52afe39c1db/report.json",
+      "report_sha256": "3791c91688ef25fd28e4b7efc475ed0d5991bea2e01e9d42e4a291b924584cdb"
+    },
+    "qwen2.5-3b": {
+      "calibration_id": "fb8df2d688af26bcefe6",
+      "head_lr_multiplier": 5.0,
+      "lr": 0.0003,
+      "model_revision": "3aab1f1954e9cc14eb9509a215f9e5ca08227a9b",
+      "tested_rates": [
+        7.5e-05,
+        0.00015,
+        0.0003
+      ],
+      "upper_search_boundary": true,
+      "completed_cases": 12,
+      "report_relative_path": "lr_test/experiments/fb8df2d688af26bcefe6/report.json",
+      "report_sha256": "d692a0efa70a5c30d7025af181071a86242e8d277493712151bdd7cc169719c4"
+    }
+  },
+  "limitations": [
+    "Llama, Granite and Qwen3B selections are at the upper tested LR boundary.",
+    "Two confirmation seeds and RTE-only endpoint checks do not establish a global or every-rank optimum.",
+    "The project default 4x4 micro-batch partition differs from the measured 16x1 partition; use 16x1 to reproduce these calibration controls.",
+    "Full-FT rates and head ratios were not calibrated by this LoRA-only cohort."
+  ],
+  "original_evidence": {
+    "results_volume": "fyp-finetune-results",
+    "directory": "/frw-20261018/defaults/"
+  },
+  "role": "Static provenance for promoted project defaults, not an activated cohort-local lr_defaults.json.",
+  "source_defaults_payload_sha256": "00f624df511a97ac15051c5f13e1280e4ca59f02762be31d9f8f74a2c97fed09",
+  "source_defaults_file_sha256": "9b312881a4e7d3d0eedbd52d30b47afefc3cff63f75562b91d8e51e101429a23"
+}

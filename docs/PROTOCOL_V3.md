@@ -4,6 +4,8 @@ This user-authorized amendment implements all five improvements requested after 
 
 The implementation uses suite 3.0.0 and protocol `frw-v3`. Start a new output cohort. v2 results are not loaded into v3 analysis; source hashes and immutable controls prevent silent reuse. No production-checkpoint calibration results, optimal rates, accuracy improvements or rental-time measurements were generated during implementation.
 
+On 18 October 2026, a subsequent real 48-case LoRA-only calibration selected adapter LRs `4.00e-4 / 1.85e-4 / 3.20e-4 / 3.00e-4` and head multipliers `5 / 1 / 5 / 5` in registry order. At the user's request these now supply project defaults for fresh outputs. [LORA_DEFAULTS.md](LORA_DEFAULTS.md) records the evidence, boundary warnings, measured controls and frozen-source instructions. Full-FT values remain uncalibrated priors. The candidate grid below continues to use the original methodology priors, separately from promoted defaults, and cohort-local calibration still overrides project defaults after validation.
+
 ## Evidence and candidate grid
 
 [Lee et al., Learning Rate Matters](https://arxiv.org/html/2602.04998v2) show that model, task and LoRA parameterization affect useful LR ranges; [Biderman et al.](https://arxiv.org/html/2405.09673v2) motivate measuring learning alongside retention and checking the optimization policy. Neither study establishes exact optimal rates for this four-model classification protocol. [Mosbach et al.](https://arxiv.org/abs/2006.04884v3) motivate replicated calibration and checks for failed learning.

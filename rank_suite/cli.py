@@ -48,7 +48,7 @@ def _add_run(p):
     p.add_argument("--test-lr", action="store_true",
                    help="calibrate LR/head rates on training holdouts, save plots and defaults, then exit")
     p.add_argument("--head-lr-multiplier", type=float,
-                   help="explicit head/backbone LR ratio (otherwise calibrated or 1); fixes head ratio during LR tests")
+                   help="explicit head/backbone LR ratio (otherwise cohort or project track default); fixes head ratio during LR tests")
     p.add_argument("--track", choices=("lora", "full", "both"), default="both")
     p.add_argument("--mode", choices=("main", "pilot", "sanity", "smoke"), default="main",
                    help="pilot runs reusable main configurations; smoke/sanity are isolated")
@@ -186,6 +186,7 @@ def main(argv=None):
         elif args.command == "list-models":
             for key, m in config.MODELS.items():
                 print(f"{key:16} {m.hf_id:42} {m.params_total}B  LoRA={m.default_lora_lr:g} "
+                      f"LoRA_head={config.DEFAULT_LORA_HEAD_MULTIPLIER[key]:g}x "
                       f"full={m.default_full_lr:g}  {m.license}")
             print("Default ranks:", config.DEFAULT_RANKS, " Seeds:", config.DEFAULT_SEEDS)
         else:

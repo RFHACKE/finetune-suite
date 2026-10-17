@@ -4,6 +4,8 @@ Rank, learning and forgetting in compact decoder-only language models
 
 Review date: 17 October 2026. Project reviewed: the original proposal, methodology v1.1, and executable protocol `frw-v2`. This is a research synthesis and recommendation document, not a report of completed experiments.
 
+Subsequent update, 18 October 2026: completed 48-case LoRA calibration supplied the [current project LR/head defaults](LORA_DEFAULTS.md). The nominal rates and candidate tables in this historical review describe the original methodology priors, which remain the registered calibration/sanity search centers.
+
 ## Executive assessment
 
 The project remains worthwhile as a controlled empirical study of how vanilla LoRA rank affects sequential classification in four fixed base checkpoints. Its strongest contribution would be a reproducible account of when an adapter learns enough, retains earlier tasks, and uses its available update capacity. An empty feasible set, a non-monotonic rank curve, or no spectral association would all be useful results if the design and uncertainty are reported correctly.
