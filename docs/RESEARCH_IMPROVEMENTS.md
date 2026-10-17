@@ -1,8 +1,8 @@
 # Research improvements and candidate hyperparameters
 
-Extracted from the [full literature review](literature-review.md) and [Word review](../literature-review.docx), reviewed 17 October 2026. The four selected base models remain fixed. These proposals have not been applied to the experiment code.
+Extracted from the [full literature review](literature-review.md) and [Word review](../literature-review.docx), reviewed 17 October 2026. The four selected base models remain fixed. Selected measurement and LR/head-calibration proposals are implemented in [frw-v3](PROTOCOL_V3.md); the remaining entries are optional proposals. New/Extend statuses describe the reviewed v2 baseline.
 
-Priority P1 means the best return for this FYP; P2 means a targeted follow-up after the core design is sound; P3 means optional future work. “New” identifies work absent from the current suite. “Extend” means the suite already supplies part of the measurement. These are design recommendations and candidate values, not claims of demonstrated improvement.
+Priority P1 means the best return for this FYP; P2 means a targeted follow-up after the core design is sound; P3 means optional future work. “New” identifies work absent from the reviewed v2 baseline. “Extend” means that baseline already supplies part of the measurement. The subsequent v3 implementation is identified in the executive assessment and protocol amendment. These are design recommendations and candidate values, not claims of demonstrated improvement.
 
 Cost categories refer to additional work: CPU means analysis of already saved artifacts; evaluation means additional forward passes; calibration means isolated training-only checks; cohort means additional experimental training. Actual dollars require measured timings and the current rental quote. Preserve existing primary outcomes even when adding richer secondary measurements.
 

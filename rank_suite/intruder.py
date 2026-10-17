@@ -19,7 +19,7 @@ from .protocol import digest, file_lock
 
 logger = logging.getLogger("rank_suite.intruder")
 EPS_VALUES = (0.6, 0.7, 0.8, 0.9)
-ANALYSIS_VERSION = "all-left-v2"
+ANALYSIS_VERSION = "all-left-v3-update-subspace"
 
 
 def file_sha256(path):
@@ -84,7 +84,7 @@ def export_boundary_projections(model, track, path, identity):
     return file_sha256(path)
 
 
-def left_vectors(weight, k=None, solver="eigh"):
+def left_spectrum(weight, k=None, solver="eigh"):
     """Dense deterministic LAPACK decompositions, without randomized SVD.
 
     A full fp32 reference SVD is computed once. For tuned top-k vectors,
@@ -97,15 +97,26 @@ def left_vectors(weight, k=None, solver="eigh"):
         raise ValueError("SVD input must be a finite matrix")
     if k is None or solver == "svd":
         u, s, _ = linalg.svd(w, full_matrices=False, check_finite=False, lapack_driver="gesdd")
-        return u if k is None else u[:, :min(k, len(s))]
+        return (u, s) if k is None else (u[:, :min(k, len(s))], s[:min(k, len(s))])
     if solver != "eigh":
         raise ValueError("solver must be eigh or svd")
     w64 = w.astype(np.float64)
     n = w64.shape[0]
     k = min(k, min(w64.shape))
-    _, u = linalg.eigh(w64 @ w64.T, subset_by_index=(n - k, n - 1),
-                       driver="evr", check_finite=False)
-    return np.ascontiguousarray(u[:, ::-1], dtype=np.float32)
+    values, u = linalg.eigh(w64 @ w64.T, subset_by_index=(n - k, n - 1),
+                           driver="evr", check_finite=False)
+    return np.ascontiguousarray(u[:, ::-1], dtype=np.float32), np.sqrt(np.maximum(values[::-1], 0))
+
+
+def left_vectors(weight, k=None, solver="eigh"):
+    return left_spectrum(weight, k, solver)[0]
+
+
+def _counts_from_vectors(top, ref):
+    ref = ref / np.maximum(np.linalg.norm(ref, axis=0, keepdims=True), 1e-30)
+    top = top / np.maximum(np.linalg.norm(top, axis=0, keepdims=True), 1e-30)
+    max_sim = np.clip(np.abs(top.T @ ref).max(axis=1), 0, 1)
+    return {f"{e:.1f}": int((max_sim < e).sum()) for e in EPS_VALUES}, max_sim
 
 
 def intruder_counts(W_ft, U0, k=config.INTRUDER_K, side="left", solver="eigh"):
@@ -114,24 +125,78 @@ def intruder_counts(W_ft, U0, k=config.INTRUDER_K, side="left", solver="eigh"):
     w = W_ft.detach().float().cpu().numpy() if torch.is_tensor(W_ft) else W_ft
     ref = U0.detach().float().cpu().numpy() if torch.is_tensor(U0) else np.asarray(U0)
     top = left_vectors(w, k, solver)
-    ref = ref / np.maximum(np.linalg.norm(ref, axis=0, keepdims=True), 1e-30)
-    top = top / np.maximum(np.linalg.norm(top, axis=0, keepdims=True), 1e-30)
-    max_sim = np.clip(np.abs(top.T @ ref).max(axis=1), 0, 1)
-    return {f"{e:.1f}": int((max_sim < e).sum()) for e in EPS_VALUES}, max_sim
+    return _counts_from_vectors(top, ref)
 
 
 def _cached_reference(base_weight, path):
     if path.exists():
-        return np.load(path, allow_pickle=False)
-    vectors = left_vectors(base_weight.float().numpy())
+        with np.load(path, allow_pickle=False) as saved:
+            return saved["vectors"], saved["singular_values"]
+    vectors, singular_values = left_spectrum(base_weight.float().numpy())
     import os
     import tempfile
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".npy", delete=False) as f:
-        np.save(f, vectors, allow_pickle=False)
+    with tempfile.NamedTemporaryFile(dir=path.parent, suffix=".npz", delete=False) as f:
+        np.savez(f, vectors=vectors, singular_values=singular_values)
         tmp = f.name
     os.replace(tmp, path)
-    return vectors
+    return vectors, singular_values
+
+
+def update_diagnostics(original, value, track):
+    """Gauge-invariant merged-update metrics; LoRA needs only an r×r SVD."""
+    from scipy import linalg
+    base = (original.detach().float().cpu().numpy().astype(np.float64)
+            if torch.is_tensor(original) else np.asarray(original, dtype=np.float64))
+    if track == "lora":
+        a, b = np.asarray(value["A"], dtype=np.float64), np.asarray(value["B"], dtype=np.float64)
+        _, rb = linalg.qr(b, mode="economic", check_finite=False)
+        _, ra = linalg.qr(a.T, mode="economic", check_finite=False)
+        singular = linalg.svdvals(float(value["scale"]) * rb @ ra.T, check_finite=False)
+        denominator = a.shape[0]
+    else:
+        delta = np.asarray(value, dtype=np.float64) - base
+        singular = linalg.svdvals(delta, check_finite=False)
+        denominator = min(base.shape)
+    if not np.isfinite(singular).all():
+        raise ValueError("Nonfinite update spectrum")
+    tolerance = max(base.shape) * np.finfo(np.float64).eps * (singular[0] if len(singular) else 0)
+    singular = singular[singular > tolerance]
+    energy = float(np.sum(singular ** 2))
+    zero = not len(singular)
+    frob = float(np.sqrt(energy))
+    norm0 = float(linalg.norm(base, "fro"))
+    spectral = float(singular[0]) if not zero else 0.0
+    p = singular / singular.sum() if not zero else singular
+    erank = float(np.exp(-np.sum(p * np.log(p)))) if not zero else 0.0
+    return {"zero_update": zero, "frobenius_norm": frob,
+            "relative_frobenius": frob / norm0 if norm0 else None,
+            "spectral_norm": spectral, "stable_rank": energy / spectral ** 2 if spectral else 0.0,
+            "effective_rank": erank, "effective_rank_fraction": erank / denominator,
+            "rank_denominator": denominator, "numerical_rank": int(len(singular)),
+            "energy_rank_90": int(np.searchsorted(np.cumsum(singular ** 2), .9 * energy) + 1) if not zero else 0,
+            "singular_value_tolerance": float(tolerance)}
+
+
+def subspace_diagnostics(reference, ref_s, tuned, tuned_s, requested=(10, 20)):
+    """Leading-subspace distance is invariant to rotations inside the span."""
+    from scipy import linalg
+    output = {}
+    for target in requested:
+        k = min(target, reference.shape[1], tuned.shape[1])
+        cosines = np.clip(linalg.svdvals(reference[:, :k].astype(np.float64).T
+                                        @ tuned[:, :k].astype(np.float64)), 0, 1)
+        distance = float(np.clip(1 - np.sum(cosines ** 2) / k, 0, 1))
+        def gap(s):
+            if k >= len(s):
+                return {"absolute": None, "relative": None, "near_tie": None}
+            absolute = float(max(s[k - 1] - s[k], 0))
+            relative = absolute / max(float(s[k - 1]), 1e-30)
+            return {"absolute": absolute, "relative": relative, "near_tie": relative < 1e-3}
+        output[str(target)] = {"k_actual": k, "distance": distance,
+            "principal_angles_radians": np.arccos(cosines).tolist(),
+            "reference_cutoff_gap": gap(ref_s), "tuned_cutoff_gap": gap(tuned_s)}
+    return output
 
 
 def analyze_intruders(root, models=None, threads=4, solver="eigh"):
@@ -186,19 +251,23 @@ def analyze_intruders(root, models=None, threads=4, solver="eigh"):
                         if name in cache:
                             continue
                         original = base["weights"][name]
-                        ref_path = (root / "cache" / "spectra-v2" / base_meta["sha256"]
-                                    / digest(numerical_stack) / f"{name}.npy")
+                        ref_path = (root / "cache" / "spectra-v3" / base_meta["sha256"]
+                                    / digest(numerical_stack) / f"{name}.npz")
                         with file_lock(ref_path.with_suffix(".lock")):
-                            ref = _cached_reference(original, ref_path)
+                            ref, ref_s = _cached_reference(original, ref_path)
                         w = (original.float() + value["scale"] * (value["B"] @ value["A"])
                              if result["track"] == "lora" else value)
-                        counts, sims = intruder_counts(w, ref, solver=solver)
+                        top, singular = left_spectrum(w, k=21, solver=solver)
+                        counts, sims = _counts_from_vectors(top[:, :config.INTRUDER_K], ref)
                         near = bool(any(np.any(np.abs(sims - e) < 1e-4) for e in EPS_VALUES))
                         if near and solver == "eigh":
-                            counts, sims = intruder_counts(w, ref, solver="svd")
+                            top, singular = left_spectrum(w, k=21, solver="svd")
+                            counts, sims = _counts_from_vectors(top[:, :config.INTRUDER_K], ref)
                         cache[name] = {"counts": counts, "max_cosines": sims.tolist(),
                                        "near_threshold": near,
-                                       "direct_svd_check": near and solver == "eigh"}
+                                       "direct_svd_check": near and solver == "eigh",
+                                       "update": update_diagnostics(original, value, result["track"]),
+                                       "subspace": subspace_diagnostics(ref, ref_s, top, singular)}
                         utils.save_json(adir / "matrices.json", cache)
                     total = {f"{e:.1f}": sum(x["counts"][f"{e:.1f}"] for x in cache.values())
                              for e in EPS_VALUES}
@@ -217,6 +286,8 @@ def analyze_intruders(root, models=None, threads=4, solver="eigh"):
                         "by_matrix_type": by_type,
                         "by_layer": by_layer,
                         "by_matrix": {n: v["counts"] for n, v in cache.items()},
+                        "diagnostics_by_matrix": {n: {"update": v["update"], "subspace": v["subspace"]}
+                                                  for n, v in cache.items()},
                         "mean_max_cosine": float(np.mean([s for v in cache.values()
                                                            for s in v["max_cosines"]])),
                         "intruder_fraction": {e: n / n_vectors

@@ -2,14 +2,21 @@
 from . import config
 
 
-def completeness_audit(results, mode="main"):
+def completeness_audit(results, mode="main", default_policy=None):
     present = {(r["model"], r["track"], r.get("rank"), r["lr"], r["seed"])
                for r in results if r.get("mode") == "main"}
     missing = []
     for key, m in config.MODELS.items():
+        def rate(track):
+            declared = {r[f"declared_{track}_lr"] for r in results
+                        if r["model"] == key and r.get(f"declared_{track}_lr") is not None}
+            if len(declared) > 1:
+                raise ValueError("Conflicting declared LR anchors")
+            return (next(iter(declared)) if declared else
+                    (default_policy or {}).get(key, {}).get(track, {}).get("lr", getattr(m, f"default_{track}_lr")))
         for seed in config.DEFAULT_SEEDS:
-            for track, rank, lr in [("lora", r, m.default_lora_lr) for r in config.METHODOLOGY_RANKS] + [
-                    ("full", None, m.default_full_lr)]:
+            for track, rank, lr in [("lora", r, rate("lora")) for r in config.METHODOLOGY_RANKS] + [
+                    ("full", None, rate("full"))]:
                 if (key, track, rank, lr, seed) not in present:
                     missing.append({"model": key, "track": track, "rank": rank, "lr": lr, "seed": seed})
     pending = sum(r.get("intruder_status") != "completed" for r in results)

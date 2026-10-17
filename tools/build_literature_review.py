@@ -162,7 +162,7 @@ def style_document(doc):
     core.subject = "LoRA rank, learning, retention, spectra and cost in four fixed decoder-only base models"
     core.author = "FYP research review"
     core.keywords = "LoRA, continual learning, BWT, intruder dimensions, hyperparameters, reproducibility"
-    core.comments = "Generated from the review Markdown and audited source ledger. Recommendations are not implemented experimental changes."
+    core.comments = "Generated from the review Markdown and audited source ledger. The review records a v2 baseline; selected recommendations are implemented in the separately documented v3 amendment."
     core.created = core.modified = datetime(2026, 10, 17, tzinfo=timezone.utc)
 
 
@@ -310,7 +310,7 @@ def make_recommendations(markdown, sources):
     selected = selected.split("\n", 1)[1]
     selected = re.sub(r"<!-- (?:landscape|portrait) -->\n?", "", selected)
     out = "# Research improvements and candidate hyperparameters\n\n"
-    out += "Extracted from the [full literature review](literature-review.md) and [Word review](../literature-review.docx), reviewed 17 October 2026. The four selected base models remain fixed. These proposals have not been applied to the experiment code.\n\n"
+    out += "Extracted from the [full literature review](literature-review.md) and [Word review](../literature-review.docx), reviewed 17 October 2026. The four selected base models remain fixed. Selected measurement and LR/head-calibration proposals are implemented in [frw-v3](PROTOCOL_V3.md); the remaining entries are optional proposals. New/Extend statuses describe the reviewed v2 baseline.\n\n"
     out += selected.strip() + "\n\n## Sources cited in these tables\n\n"
     for key in sorted(citation_ids(selected)):
         s = sources[key]
@@ -339,7 +339,7 @@ def build(output):
     doc.add_paragraph("Rank, learning and forgetting in compact\ndecoder-only language models", style="Subtitle")
     p = doc.add_paragraph("A critical review of the research evidence\nand 28 concrete design recommendations")
     p.paragraph_format.space_before = Cm(0.6)
-    doc.add_paragraph("17 October 2026  •  62 source records  •  Protocol frw-v2")
+    doc.add_paragraph("17 October 2026  •  62 source records  •  Review baseline: frw-v2; implementation: frw-v3")
     doc.add_paragraph("Fixed models: Llama-3.2-1B · Qwen2.5-1.5B · Granite-3.3-2B · Qwen2.5-3B")
     note = doc.add_paragraph("Recommendations are distinguished from published evidence. No new experimental results or optimal hyperparameters are claimed.")
     note.paragraph_format.space_before = Cm(0.8)

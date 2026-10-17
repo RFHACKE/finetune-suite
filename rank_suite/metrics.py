@@ -33,6 +33,10 @@ def compute_run_metrics(A, task_keys):
             "final_task_acc": A[-1][-1], "avg_diagonal": float(np.mean(diag)),
             "avg_final_row": float(np.mean(A[-1])),
             "avg_matrix": float(np.mean([A[i][j] for i in range(T) for j in range(i + 1)])),
+            "diagonal_accuracies": dict(zip(task_keys, diag)),
+            "transition_changes": {f"{task_keys[i - 1]}->{task_keys[i]}:{task_keys[j]}": A[i][j] - A[i - 1][j]
+                                   for i in range(1, T) for j in range(i)},
+            "worst_task_final_change": min(components.values()) if components else None,
             "per_task_forgetting": components, "per_task_peak_forgetting": peaks,
             "peak_forgetting": float(np.mean(list(peaks.values()))) if peaks else None}
 
@@ -72,9 +76,10 @@ def results_dataframe(results):
         primary = total.get("0.9")
         denom = intr.get("n_vectors", intr.get("n_matrices", 0) * intr.get("k", config.INTRUDER_K))
         row = {k: r.get(k) for k in ("run_id", "model", "hf_id", "track", "rank", "alpha", "lr", "seed",
-                                    "status", "trainable_params", "train_time_s", "peak_vram_gb", "d_model", "wv_out")}
+                                    "status", "trainable_params", "train_time_s", "peak_vram_gb", "d_model", "wv_out",
+                                    "head_lr_multiplier", "declared_lora_lr", "declared_full_lr")}
         row.update({k: m.get(k) for k in ("bwt", "forgetting_magnitude", "final_task_acc", "avg_final_row",
-                                          "avg_diagonal", "avg_matrix", "peak_forgetting")})
+                                          "avg_diagonal", "avg_matrix", "peak_forgetting", "worst_task_final_change")})
         row.update({"intruder_total_final": primary, "intruder_final_boundary": boundary,
                     "intruder_fraction_final": primary / denom if primary is not None and denom else None,
                     "intruder_status": r.get("intruder_status", "pending_cpu"),
@@ -82,8 +87,12 @@ def results_dataframe(results):
         for e in ("0.6", "0.7", "0.8", "0.9"):
             row[f"intruder_eps_{e}"] = total.get(e)
         for i, ti in enumerate(r["task_order"]):
+            row[f"diagonal_{ti}"] = r["A"][i][i]
+            row[f"majority_{ti}"] = (r.get("data", {}).get(ti) or {}).get("majority_eval_accuracy")
             for j, tj in enumerate(r["task_order"][:i + 1]):
                 row[f"A_{ti}_{tj}"] = r["A"][i][j]
+                if j < i:
+                    row[f"transition_{ti}_{tj}"] = r["A"][i][j] - r["A"][i - 1][j]
         for key, value in m.get("per_task_forgetting", {}).items():
             row[f"forget_{key}"] = value
         rows.append(row)
@@ -98,6 +107,7 @@ def config_summary(df):
         return df
     cols = [c for c in ("bwt", "final_task_acc", "avg_final_row", "avg_diagonal", "avg_matrix",
                         "peak_forgetting", "intruder_total_final", "intruder_fraction_final") if c in df]
+    cols += [c for c in df if c.startswith(("A_", "diagonal_", "transition_", "forget_"))]
     out = df.groupby(CONFIG_KEYS, dropna=False).agg({c: ["mean", "std", "count"] for c in cols})
     out.columns = ["_".join(c) for c in out.columns]
     return out.reset_index()
@@ -120,6 +130,18 @@ def _five_seeds(df):
     return len(df) == len(config.DEFAULT_SEEDS) and set(df["seed"]) == set(config.DEFAULT_SEEDS)
 
 
+def declared_lr(runs_df, model, track):
+    """Read the frozen calibration anchor, never choose a baseline from outcomes."""
+    name = f"declared_{track}_lr"
+    if name in runs_df:
+        values = runs_df.loc[runs_df["model"] == model, name].dropna().unique()
+        if len(values) > 1:
+            raise ValueError("Conflicting declared LR anchors in one model cohort")
+        if len(values):
+            return float(values[0])
+    return getattr(config.MODELS[model], f"default_{track}_lr")
+
+
 def feasible_windows(cfg_df, runs_df):
     """Only certify the full five-rank, five-seed design with a fixed baseline.
 
@@ -133,7 +155,7 @@ def feasible_windows(cfg_df, runs_df):
     lora = cfg_df[cfg_df["track"] == "lora"]
     for model in sorted(lora["model"].unique()):
         m = config.MODELS[model]
-        full_lr = m.default_full_lr
+        full_lr = declared_lr(runs_df, model, "full")
         full = runs_df[(runs_df["model"] == model) & (runs_df["track"] == "full")
                        & np.isclose(runs_df["lr"], full_lr, rtol=1e-10, atol=0)]
         full_ok = _five_seeds(full)
@@ -227,11 +249,11 @@ def intruder_correlations(runs_df):
                     "p_value": float(p), "x": x,
                     "interpretation": "exploratory; repeated ranks/seeds are not independent causal evidence"})
     if not lora.empty:
-        primary = lora[lora.apply(lambda row: np.isclose(row["lr"], config.MODELS[row["model"]].default_lora_lr,
+        primary = lora[lora.apply(lambda row: np.isclose(row["lr"], declared_lr(runs_df, row["model"], "lora"),
                                                         rtol=1e-10, atol=0), axis=1)]
         add(primary.dropna(subset=["intruder_fraction_final"]), "pooled_normalized_exploratory", "intruder_fraction_final")
         for (model, lr), group in lora.groupby(["model", "lr"]):
-            label = (model if np.isclose(lr, config.MODELS[model].default_lora_lr, rtol=1e-10, atol=0)
+            label = (model if np.isclose(lr, declared_lr(runs_df, model, "lora"), rtol=1e-10, atol=0)
                      else f"{model}@lr={lr:g}")
             add(group, label)
             means = group.groupby("rank", as_index=False)[["intruder_total_final", "bwt"]].mean()
@@ -242,3 +264,86 @@ def intruder_correlations(runs_df):
                     "mean_intruders_eps09": float(full["intruder_total_final"].mean()),
                     "max_intruders_eps09": int(full["intruder_total_final"].max())})
     return out
+
+
+def all_task_feasible_sets(runs_df, margins=(1.0, 2.0, 5.0)):
+    """Supplementary all-task gates; the original window remains a separate output.
+
+    Simultaneous t intervals cover 25 constraints within each model/LR family:
+    five prescribed ranks times three learning and two retention comparisons.
+    The normal independent-seed-difference assumption is explicit; five seeds
+    do not establish generalization over datasets or task orders.
+    """
+    from scipy.stats import t
+    if runs_df.empty:
+        return []
+    output = []
+    tasks = config.TASK_KEYS
+    for model in sorted(runs_df.loc[runs_df.track == 'lora', 'model'].unique()):
+        baseline_lr = declared_lr(runs_df, model, 'full')
+        full = runs_df[(runs_df.model == model) & (runs_df.track == 'full')
+                       & np.isclose(runs_df.lr, baseline_lr, rtol=1e-10, atol=0)]
+        baseline_complete = _five_seeds(full)
+        needed = [f'A_{task}_{task}' for task in tasks]
+        needed += [f'A_{tasks[-1]}_{task}' for task in tasks[:-1]]
+        if any(col not in runs_df for col in needed):
+            continue
+        health = {}
+        for task in tasks:
+            majority = f'majority_{task}'
+            known = baseline_complete and majority in full and full[majority].notna().all()
+            health[task] = (bool(full[f'A_{task}_{task}'].mean() > full[majority].mean())
+                            if known else None)
+        healthy = all(v is True for v in health.values())
+        lora = runs_df[(runs_df.model == model) & (runs_df.track == 'lora')]
+        for lr, group in lora.groupby('lr'):
+            details, complete_ranks = [], set()
+            for rank in config.METHODOLOGY_RANKS:
+                part = group[group['rank'] == rank]
+                complete = _five_seeds(part)
+                if complete:
+                    complete_ranks.add(rank)
+                comparisons = []
+                if complete and baseline_complete:
+                    a, b = part.set_index('seed'), full.set_index('seed')
+                    seeds = list(config.DEFAULT_SEEDS)
+                    for task in tasks:
+                        col = f'A_{task}_{task}'
+                        comparisons.append(('learning', task, (a.loc[seeds, col] - b.loc[seeds, col]).to_numpy()))
+                    for task in tasks[:-1]:
+                        comparisons.append(('retention', task,
+                            (a.loc[seeds, f'A_{tasks[-1]}_{task}'] - a.loc[seeds, f'A_{task}_{task}']).to_numpy()))
+                constraints = []
+                for kind, task, differences in comparisons:
+                    mean = float(np.mean(differences) * PP)
+                    half = float(t.ppf(1 - .05 / (2 * 25), 4) * np.std(differences, ddof=1) / np.sqrt(5) * PP)
+                    constraints.append({'kind': kind, 'task': task, 'mean_change_pp': mean,
+                                        'simultaneous_ci_low_pp': mean - half,
+                                        'simultaneous_ci_high_pp': mean + half})
+                details.append({'rank': rank, 'seed_complete': complete, 'constraints': constraints})
+            certified = baseline_complete and len(complete_ranks) == len(config.METHODOLOGY_RANKS) and healthy
+            for margin in margins:
+                passing, supported, rejected = [], [], []
+                rank_details = []
+                for item in details:
+                    constraints = item['constraints']
+                    point = len(constraints) == 5 and all(c['mean_change_pp'] >= -margin - 1e-10 for c in constraints)
+                    support = point and all(c['simultaneous_ci_low_pp'] >= -margin - 1e-10 for c in constraints)
+                    reject = any(c['simultaneous_ci_high_pp'] < -margin - 1e-10 for c in constraints)
+                    if certified and point:
+                        passing.append(item['rank'])
+                    if certified and support:
+                        supported.append(item['rank'])
+                    if certified and reject:
+                        rejected.append(item['rank'])
+                    rank_details.append({**item, 'point_pass': point,
+                        'interval_decision': 'supported' if support else 'fails' if reject else 'inconclusive'})
+                output.append({'model': model, 'lr': float(lr), 'tolerance_pp': margin,
+                    'status': 'complete' if certified else 'baseline_underlearning' if False in health.values() else 'incomplete',
+                    'baseline_lr': baseline_lr, 'baseline_seeds_complete': baseline_complete,
+                    'baseline_learning_above_majority': health, 'window_ranks': passing,
+                    'window_intervals': _intervals(config.METHODOLOGY_RANKS, passing),
+                    'interval_supported_ranks': supported, 'interval_rejected_ranks': rejected,
+                    'details': rank_details, 'interval_family': '25 constraints within model/LR; Bonferroni 95% t intervals',
+                    'interpretation': 'supplementary operational gates; intervals assume independent normal paired seed differences'})
+    return output

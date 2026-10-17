@@ -2,7 +2,19 @@
 
 Development review: 17 October 2026. This records software and numerical checks, not FYP experimental findings.
 
-The full CPU pass and final targeted regression checks cover **44 passing tests**; **six CUDA integration cases were skipped** in the validated CPU environment. The parallel launcher also completed a real two-worker planning dry run.
+The v3 full CPU regression run and final targeted checks cover **58 passing CPU cases**; **six CUDA integration cases were skipped** in the validated CPU environment. The full pass completed with 56 passing tests; subsequent targeted runs covered the two added guards and revalidated the changed calibration/measurement paths. The parallel launcher also completed a real two-worker planning dry run during the original suite validation.
+
+## V3 implementation checks
+
+- Executed the complete 88-case selection workflow with explicitly synthetic scoring fixtures for all four fixed model keys and both tracks. Verified different winning rates per model/track, automatic head/rate defaults, 32 saved charts, no retraining on repeat, training-only selection, failure/budget behavior and matching evidence checks. Synthetic fixture outputs remain in temporary test directories.
+- Verified forced recalibration preserves the existing active report and activates a separate replacement report only after success. Main/pilot controls prevent recalibration in an already-started cohort.
+- Executed actual tiny Qwen calibration training, recording NLL and scheduled head/backbone LR ratios without permanent model/projection exports. Accumulation equivalence covers head ratios 1 and 5; real bitsandbytes parameter-group configuration keeps matrix moments at 8-bit and head/vector moments at fp32.
+- Compared QR-derived LoRA update spectra against dense full-update SVDs and reciprocal factor rescaling; checked exact zero updates. Verified subspace invariance under basis rotation and sensitivity to a changed leading span.
+- Executed real tiny-model task-boundary export → deferred spectra → long JSON/CSV → all three new measurement-chart paths. A LoRA-only partial-cohort plotting failure was found and fixed; final targeted analysis checks passed.
+- Checked all-task gates against hidden cancellation, underlearned references, fixed tolerances and calibrated baseline anchors. Verified explicit disjoint calibration split indices.
+- Checked all **30 CLI flag spellings** against command-specific documentation, parsed 36 runnable usage examples, and confirmed invalid calibration combinations fail before GPU work. Ruff, shell syntax, Word structure/citations and whitespace checks passed.
+
+Production calibration has not been performed. The development GPU has insufficient VRAM for the full fixed-model/full-FT scope, and the validated Python environment uses CPU PyTorch. No winning production LRs, GPU throughput, scientific accuracy or rental costs are claimed.
 
 ## Environment and checks
 
@@ -26,7 +38,7 @@ The production pinned Qwen2.5-1.5B tokenizer and pinned `nyu-mll/glue` revision 
 
 Repeated RTE preparation reused identical selection metadata successfully. The training-only calibration path produced 1,992 training and 498 held-out examples, with no official validation examples used for calibration. Token lengths and majority-class references are recorded in data provenance.
 
-## CPU spectral microbenchmark
+## CPU spectral microbenchmark (v2 numerical path)
 
 Four BLAS threads, seeded random float32 matrices at the actual projection dimensions; full fp32 SVD versus float64 Gram + top-ten subset eigensolve. These are **synthetic matrices**, not timing measurements on pretrained checkpoints or estimates of paid GPU throughput.
 
@@ -36,6 +48,8 @@ Four BLAS threads, seeded random float32 matrices at the actual projection dimen
 | 512 × 2048 | 0.195 | 0.030 |
 | 1536 × 1536 | 0.759 | 0.293 |
 | 2048 × 2048 | 2.235 | 0.736 |
+
+The v3 analyzer additionally computes top-21 tuned vectors, update spectra and k=10/20 subspace diagnostics; the table is not a measured v3 end-to-end runtime.
 
 Absolute leading-vector alignment exceeded 0.9999997 in every case, apart from floating-point rounding at unity. At 2048 square the subset method was about three times faster on this CPU. End-to-end spectral time also includes reference decompositions, matrix reconstruction, checksums and I/O, and varies across hardware and spectra.
 

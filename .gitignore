@@ -6,6 +6,9 @@ setup-freeze.txt
 *.egg-info/
 .pytest_cache/
 results/
+results*/
+lr_test/
+lr_defaults.json
 .mypy_cache/
 .ruff_cache/
 session-resume.txt

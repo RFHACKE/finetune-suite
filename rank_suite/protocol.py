@@ -25,13 +25,14 @@ def source_digest() -> str:
 
 
 @contextmanager
-def file_lock(path: Path, blocking=True):
+def file_lock(path: Path, blocking=True, shared=False):
     """Lock files persist; kernel locks disappear automatically after a crash."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as f:
         try:
-            fcntl.flock(f, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+            fcntl.flock(f, (fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+                        | (0 if blocking else fcntl.LOCK_NB))
         except BlockingIOError:
             yield False
             return
@@ -58,14 +59,15 @@ def experiment_controls(spec) -> dict:
     # Grid subsets, sharding and price do not change a run's scientific controls.
     smoke = spec.mode == "smoke"
     sanity = spec.mode == "sanity"
+    calibration = sanity or spec.mode == "lr_test"
     selected = 64 if smoke else spec.train_samples
     return {
         "protocol": config.PROTOCOL_VERSION, "source_sha256": source_digest(),
-        "cohort": spec.mode if smoke or sanity else "main",
+        "cohort": spec.mode if smoke or calibration else "main",
         "model_revisions": config.MODEL_REVISIONS, "data_revision": config.DATA_REVISION,
         "task_order": ["rte"] if sanity else list(config.TASK_KEYS), "train_samples": selected,
-        "train_samples_used": int(.8 * selected) if sanity else selected,
-        "evaluation_policy": "train_holdout_20percent" if sanity else "official_validation",
+        "train_samples_used": int(.8 * selected) if calibration else selected,
+        "evaluation_policy": "train_holdout_20percent" if calibration else "official_validation",
         "evaluation_limit": 32 if smoke else None,
         "data_seed": config.DATA_SEED, "epochs": 1 if smoke else spec.epochs,
         "max_len": config.MAX_LEN, "encoding": config.ENCODING_VERSION,
@@ -82,6 +84,7 @@ def experiment_controls(spec) -> dict:
         "normalization_storage": "float32_both_tracks", "autocast_weight_cache": False,
         "attention": config.ATTN_IMPL, "deterministic": spec.deterministic,
         "frozen_embeddings": True, "pooling": "last_nonpad_head_fp32",
+        "learning_rate_defaults": spec.default_policy(),
         "intruder_ref": "all", "intruder_side": "left", "intruder_k": config.INTRUDER_K,
         "intruder_eps": [0.6, 0.7, 0.8, 0.9],
         "required_seeds": list(config.DEFAULT_SEEDS),

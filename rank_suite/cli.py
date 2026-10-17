@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 
 from . import config, utils
 
@@ -44,6 +45,10 @@ def _add_models(p):
 
 def _add_run(p):
     _add_models(p)
+    p.add_argument("--test-lr", action="store_true",
+                   help="calibrate LR/head rates on training holdouts, save plots and defaults, then exit")
+    p.add_argument("--head-lr-multiplier", type=float,
+                   help="explicit head/backbone LR ratio (otherwise calibrated or 1); fixes head ratio during LR tests")
     p.add_argument("--track", choices=("lora", "full", "both"), default="both")
     p.add_argument("--mode", choices=("main", "pilot", "sanity", "smoke"), default="main",
                    help="pilot runs reusable main configurations; smoke/sanity are isolated")
@@ -81,6 +86,8 @@ def _make_spec(args):
         num_shards=args.num_shards, shard_index=args.shard_index,
         hourly_rate=args.hourly_rate, budget=args.budget, reserve=args.reserve,
         max_hours=args.max_hours, fail_fast=not args.keep_going,
+        head_lr_multiplier=args.head_lr_multiplier,
+        calibrated_defaults={} if args.test_lr else None,
     )
 
 
@@ -97,7 +104,11 @@ def _print_plan(spec):
                       "fixed_models": {m: {"hf_id": config.MODELS[m].hf_id,
                                             "revision": config.MODELS[m].revision,
                                             "lora_lrs": spec.resolved_lora_lrs(m),
-                                            "full_lrs": spec.resolved_full_lrs(m)} for m in spec.models}}, indent=2))
+                                            "full_lrs": spec.resolved_full_lrs(m),
+                                            "head_lr_multipliers": {t: spec.resolved_head_multiplier(m, t)
+                                                                    for t in ("lora", "full")}}
+                                       for m in spec.models},
+                      "declared_defaults": spec.default_policy()}, indent=2))
     if spec.mode == "main":
         print("\nUse --mode pilot to measure full-length r=16 and full-FT runs before committing the grid.")
     if spec.budget or spec.max_hours:
@@ -130,12 +141,27 @@ def _build_parser():
 
 
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "--test-lr":
+        argv.insert(0, "run")
     parser = _build_parser()
     args = parser.parse_args(argv)
     utils.get_logger("rank_suite")
     try:
         if args.command in ("run", "plan"):
             spec = _make_spec(args)
+            if args.test_lr:
+                from .calibration import make_plan, run_calibration
+                if args.ranks:
+                    raise ValueError("--test-lr selects at rank 16 and diagnoses ranks 4/64; --ranks is for main runs")
+                seeds = utils.parse_int_list(args.seeds) if args.seeds else (42, 123)
+                if args.command == "plan" or args.dry_run:
+                    print(json.dumps(make_plan(spec, seeds), indent=2))
+                    return 0
+                summary = run_calibration(spec, seeds)
+                print(json.dumps(summary, indent=2))
+                print("Calibration finished. Review its JSON/charts, then run main with the same --output.")
+                return 0 if summary["status"] == "complete" else (3 if summary["status"] == "deferred" else 1)
             if args.command == "plan" or args.dry_run:
                 _print_plan(spec)
                 return 0

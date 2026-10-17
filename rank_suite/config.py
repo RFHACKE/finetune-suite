@@ -1,8 +1,8 @@
-"""Fixed four-model registry and protocol-v2 controls.
+"""Fixed four-model registry and protocol-v3 controls.
 
 The nominal model-specific LRs retain methodology v1.1's printed values as
 heuristic priors, not proven size-transfer laws. See docs/LITERATURE_REVIEW.md
-and docs/PROTOCOL_V2.md for source checks and explicit numerical amendments.
+and docs/PROTOCOL_V3.md for source checks, calibration and numerical amendments.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import math
 from typing import Optional, Sequence
 
 SUITE_NAME = "feasible-rank-window"
-SUITE_VERSION = "2.0.0"
+SUITE_VERSION = "3.0.0"
 
 # --------------------------------------------------------------------------
 # Controlled constants (methodology Sec. 2.4 / Appendix A)
@@ -66,7 +66,7 @@ MODEL_REVISIONS = {
 }
 DATA_REVISION = "bcdcba79d07bc864c1c254ccfcedcce55bcc9a8c"
 ENCODING_VERSION = "labelled-pairs-v2"
-PROTOCOL_VERSION = "frw-v2"
+PROTOCOL_VERSION = "frw-v3"
 
 
 # --------------------------------------------------------------------------
@@ -237,13 +237,15 @@ class ExperimentSpec:
     reserve: float = 0.0
     max_hours: Optional[float] = None
     fail_fast: bool = True
+    head_lr_multiplier: Optional[float] = None  # explicit override; otherwise calibrated or 1
+    calibrated_defaults: Optional[dict] = None  # loaded from this output cohort, never source edits
 
     def __post_init__(self):
         if not self.models or any(m not in MODELS for m in self.models):
             raise ValueError("Choose only the four fixed methodology models")
         if self.track not in ("lora", "full", "both"):
             raise ValueError("invalid track")
-        if self.mode not in ("main", "pilot", "sanity", "smoke"):
+        if self.mode not in ("main", "pilot", "sanity", "smoke", "lr_test"):
             raise ValueError("invalid mode")
         if not self.ranks or any(r <= 0 or r > min(MODELS[m].wv_out for m in self.models)
                                  for r in self.ranks):
@@ -274,6 +276,12 @@ class ExperimentSpec:
             raise ValueError("reserve must be finite and nonnegative")
         if self.budget is not None and (self.hourly_rate is None or self.budget <= self.reserve):
             raise ValueError("budget requires --hourly-rate and must exceed reserve")
+        if self.head_lr_multiplier is not None and (
+                not math.isfinite(self.head_lr_multiplier) or self.head_lr_multiplier <= 0):
+            raise ValueError("head LR multiplier must be finite and positive")
+        if self.calibrated_defaults is None:
+            from .lr_defaults import load_defaults
+            self.calibrated_defaults = load_defaults(self)
         for m in self.models:
             for lr in self.resolved_lora_lrs(m) + self.resolved_full_lrs(m):
                 if not math.isfinite(lr) or lr <= 0:
@@ -282,12 +290,27 @@ class ExperimentSpec:
     def resolved_lora_lrs(self, model_key: str) -> list:
         if self.lora_lrs and self.lora_lrs.get(model_key):
             return list(self.lora_lrs[model_key])
-        return [MODELS[model_key].default_lora_lr]
+        return [self.default_lr(model_key, "lora")]
 
     def resolved_full_lrs(self, model_key: str) -> list:
         if self.full_lrs and self.full_lrs.get(model_key):
             return list(self.full_lrs[model_key])
-        return [MODELS[model_key].default_full_lr]
+        return [self.default_lr(model_key, "full")]
+
+    def default_lr(self, model_key: str, track: str) -> float:
+        selected = (self.calibrated_defaults or {}).get(model_key, {}).get(track, {})
+        return selected.get("lr", getattr(MODELS[model_key], f"default_{track}_lr"))
+
+    def resolved_head_multiplier(self, model_key: str, track: str) -> float:
+        if self.head_lr_multiplier is not None:
+            return self.head_lr_multiplier
+        return (self.calibrated_defaults or {}).get(model_key, {}).get(track, {}).get("head_lr_multiplier", 1.0)
+
+    def default_policy(self) -> dict:
+        return {m: {t: {"lr": self.default_lr(m, t),
+                         "head_lr_multiplier": self.resolved_head_multiplier(m, t),
+                         "calibration_id": (self.calibrated_defaults or {}).get(m, {}).get(t, {}).get("calibration_id")}
+                    for t in ("lora", "full")} for m in MODELS}
 
 
 @dataclass
@@ -304,6 +327,7 @@ class RunSpec:
     epochs: int = EPOCHS
     train_samples: int = TRAIN_SAMPLES
     optimizer: str = "adamw"
+    head_lr_multiplier: float = 1.0
 
     @property
     def identity(self) -> dict:

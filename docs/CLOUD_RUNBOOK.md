@@ -36,6 +36,8 @@ HF_HOME=/path/to/portable-hf-cache ./run.sh prepare
 
 Copy that cache to persistent storage on the rental and set the same `HF_HOME` path there. Copy model/data caches rather than a virtualenv from a different machine. If prefetching locally is inconvenient, `./setup.sh --prefetch` performs the downloads on the rental. Download and installation time is billable there; cached files avoid doing it twice after interruption.
 
+The current protocol is [frw-v3](PROTOCOL_V3.md). Use a fresh output root for v3. LR calibration has up to 88 cases/57,000 updates, with JSON and charts under `lr_test/`; its cost is additional to the 120-sequence main study. It saves automatic defaults before main collection and excludes official validation from tuning. Calibration deliberately uses one worker; use multiple GPUs for main seed blocks after it finishes.
+
 ## One GPU: recommended progression
 
 ```bash
@@ -44,12 +46,17 @@ cd fyp-suite
 ./setup.sh
 ./run.sh plan
 
-# Short software checks. Separate results/smoke/; no main-study conclusions.
-./run.sh run --mode smoke --models qwen2.5-1.5b
-./run.sh intruders --output results/smoke
-./run.sh analyze --output results/smoke --mode smoke
+# Short software checks in a separate pre-calibration root.
+./run.sh run --mode smoke --models qwen2.5-1.5b --output results-check
+./run.sh intruders --output results-check/smoke
+./run.sh analyze --output results-check/smoke --mode smoke
 
-# Check the largest model's actual memory and speed first. Full-length main runs.
+# Calibrate rates/head ratios before main/pilot controls are frozen.
+./run.sh plan --test-lr
+./run.sh --test-lr
+./run.sh plan
+
+# Check the largest model's actual memory and speed. Full-length main runs.
 ./run.sh run --mode pilot --models qwen2.5-3b
 
 # Complete the eight-run pilot coverage, skipping completed main configurations.

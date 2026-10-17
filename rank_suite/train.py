@@ -37,11 +37,16 @@ def _to_device(batch, device):
     return {k: v.to(device, non_blocking=True) for k, v in batch.items()}
 
 
-def make_optimizer(params, lr, optimizer, head_params=()):
+def make_optimizer(params, lr, optimizer, head_params=(), head_lr_multiplier=1.0):
+    params, head_params = list(params), list(head_params)
+    head_ids = {id(p) for p in head_params}
+    groups = params
+    if head_lr_multiplier != 1.0:
+        groups = [{"params": [p for p in params if id(p) not in head_ids], "lr": lr},
+                  {"params": [p for p in params if id(p) in head_ids], "lr": lr * head_lr_multiplier}]
+        groups = [group for group in groups if group["params"]]
     if optimizer == "adamw8bit":
         import bitsandbytes as bnb
-        params = list(params)
-        head_ids = {id(p) for p in head_params}
         # Full-FT moment precision follows tensor role. Dense matrices use
         # 8-bit states; heads and normalization/bias vectors stay in fp32,
         # independent of model width or the classification label count.
@@ -52,25 +57,26 @@ def make_optimizer(params, lr, optimizer, head_params=()):
         protected = [p for p in params if p.ndim < 2 or id(p) in head_ids]
         if protected:
             manager.override_config(protected, "optim_bits", 32)
-        manager.register_parameters(params)
-        return bnb.optim.AdamW8bit(params, lr=lr, betas=config.ADAM_BETAS,
+        manager.register_parameters(groups)
+        return bnb.optim.AdamW8bit(groups, lr=lr, betas=config.ADAM_BETAS,
                                   eps=config.ADAM_EPS, weight_decay=config.WEIGHT_DECAY,
                                   min_8bit_size=0, block_wise=True,
                                   percentile_clipping=100, is_paged=False)
     if optimizer != "adamw":
         raise ValueError(f"Unknown optimizer: {optimizer}")
-    return torch.optim.AdamW(params, lr=lr, betas=config.ADAM_BETAS,
+    return torch.optim.AdamW(groups, lr=lr, betas=config.ADAM_BETAS,
                              eps=config.ADAM_EPS, weight_decay=config.WEIGHT_DECAY,
                              foreach=False)
 
 
 @torch.inference_mode()
-def evaluate(transformer, head, loader, device, prediction_path=None):
+def evaluate(transformer, head, loader, device, prediction_path=None, return_details=False):
     import numpy as np
     was_training, head_training = transformer.training, head.training
     transformer.eval()
     head.eval()
     predictions, labels = [], []
+    nll_sum = 0.0
     for batch in loader:
         batch = _to_device(batch, device)
         with _autocast(device):
@@ -79,6 +85,9 @@ def evaluate(transformer, head, loader, device, prediction_path=None):
             raise FloatingPointError("Nonfinite evaluation logits")
         predictions.append(logits.argmax(dim=-1).cpu().numpy())
         labels.append(batch["labels"].cpu().numpy())
+        nll_sum += float(F.cross_entropy(logits.float(), batch["labels"], reduction="sum"))
+        if not math.isfinite(nll_sum):
+            raise FloatingPointError("Nonfinite evaluation NLL")
     if not labels:
         raise ValueError("Empty evaluation set")
     pred, gold = np.concatenate(predictions), np.concatenate(labels)
@@ -87,15 +96,16 @@ def evaluate(transformer, head, loader, device, prediction_path=None):
         np.savez_compressed(prediction_path, predictions=pred, labels=gold)
     transformer.train(was_training)
     head.train(head_training)
-    return float((pred == gold).mean())
+    accuracy = float((pred == gold).mean())
+    return {"accuracy": accuracy, "nll": nll_sum / len(gold)} if return_details else accuracy
 
 
 def _train_task(transformer, head, params, loader, epochs, lr, optimizer,
-                device, log_path, global_step, task_key, accum=1):
+                device, log_path, global_step, task_key, accum=1, head_lr_multiplier=1.0):
     from transformers import get_cosine_schedule_with_warmup
     transformer.train()
     head.train()
-    opt = make_optimizer(params, lr, optimizer, head.parameters())
+    opt = make_optimizer(params, lr, optimizer, head.parameters(), head_lr_multiplier)
     steps_per_epoch = math.ceil(len(loader) / accum)
     total_steps = steps_per_epoch * epochs
     warmup = math.ceil(config.WARMUP_FRAC * total_steps)
@@ -130,14 +140,17 @@ def _train_task(transformer, head, params, loader, epochs, lr, optimizer,
             group_examples += n
             if (bi + 1) % accum == 0 or bi + 1 == len(loader):
                 norm = torch.nn.utils.clip_grad_norm_(params, config.GRAD_CLIP,
-                                                      error_if_nonfinite=True)
+                                                      error_if_nonfinite=False)
                 gn = float(norm)
+                if not math.isfinite(gn):
+                    raise FloatingPointError(f"Nonfinite gradient norm in {task_key}, epoch {epoch}")
                 if len(history) >= 10:
                     median = statistics.median(history[-50:])
                     if median > 0 and gn > config.GRAD_SPIKE_FACTOR * median:
                         flags["grad_spikes"].append(global_step + 1)
                 history.append(gn)
                 used_lr = opt.param_groups[0]["lr"]
+                used_head_lr = opt.param_groups[-1]["lr"]
                 opt.step()
                 sched.step()
                 opt.zero_grad(set_to_none=True)
@@ -145,7 +158,7 @@ def _train_task(transformer, head, params, loader, epochs, lr, optimizer,
                 utils.append_jsonl(log_path, {
                     "task": task_key, "epoch": epoch + 1, "step": global_step,
                     "loss": group_loss / group_examples, "examples": group_examples,
-                    "lr": used_lr, "grad_norm": gn,
+                    "lr": used_lr, "head_lr": used_head_lr, "grad_norm": gn,
                 })
                 group_loss = group_examples = 0
                 if (global_step - initial_step) % 50 == 0:
@@ -195,7 +208,9 @@ def _execute(run, run_dir, data, tokenizer, mspec, experiment, protocol_sha, har
     if str(device).startswith("cuda"):
         torch.cuda.reset_peak_memory_stats()
     model, _ = load_backbone(mspec)
-    export_base_projections(model, run_dir.parents[1], mspec)
+    calibration = run.mode == "lr_test"
+    if not calibration:
+        export_base_projections(model, run_dir.parents[1], mspec)
     heads = make_task_heads(run.task_keys, mspec.d_model, run.seed, "cpu")
     if run.track == "lora":
         trained_model = wrap_lora(model, run.rank)
@@ -220,6 +235,7 @@ def _execute(run, run_dir, data, tokenizer, mspec, experiment, protocol_sha, har
     base_params = [p for p in trained_model.parameters() if p.requires_grad]
     transformer = backbone_transformer(trained_model)
     A = [[None] * len(run.task_keys) for _ in run.task_keys]
+    NLL = [[None] * len(run.task_keys) for _ in run.task_keys]
     summaries, boundaries = {}, []
     flags = {"nan_loss_tasks": [], "grad_spike_steps": []}
     step = next_task = 0
@@ -238,6 +254,7 @@ def _execute(run, run_dir, data, tokenizer, mspec, experiment, protocol_sha, har
         for head, saved in zip(heads, state["heads"]):
             head.load_state_dict(saved)
         A, summaries, boundaries = state["A"], state["train_summary"], state["boundaries"]
+        NLL = state["NLL"]
         flags, step, next_task = state["flags"], state["step"], state["next_task"]
         prior_elapsed = state["elapsed_s"]
         torch.set_rng_state(state["torch_rng"])
@@ -255,7 +272,7 @@ def _execute(run, run_dir, data, tokenizer, mspec, experiment, protocol_sha, har
                              run.seed * 100 + ti, tokenizer)
         out = _train_task(transformer, heads[ti], params, loader, run.epochs,
                           run.lr, run.optimizer, device, log_path, step, key,
-                          accum=experiment.accum)
+                          accum=experiment.accum, head_lr_multiplier=run.head_lr_multiplier)
         step = out["global_step"]
         flags["grad_spike_steps"].extend(out["flags"]["grad_spikes"])
         summaries[key] = {"epoch_losses": out["epoch_losses"], "steps": out["steps"],
@@ -268,19 +285,21 @@ def _execute(run, run_dir, data, tokenizer, mspec, experiment, protocol_sha, har
             eval_key = run.task_keys[j]
             eval_loader = make_loader(data[eval_key].eval_dataset, experiment.eval_batch,
                                       False, run.seed, tokenizer)
-            A[ti][j] = evaluate(transformer, heads[j], eval_loader, device,
-                                ckpt / f"predictions_{eval_key}.npz")
+            evaluated = evaluate(transformer, heads[j], eval_loader, device,
+                                 ckpt / f"predictions_{eval_key}.npz", return_details=True)
+            A[ti][j], NLL[ti][j] = evaluated["accuracy"], evaluated["nll"]
         summaries[key]["eval_s"] = time.monotonic() - eval_start
         export_start = time.monotonic()
-        sha = export_boundary_projections(trained_model, run.track,
-                                          ckpt / "projections.pt", identity)
-        save_torch(ckpt / "heads.pt", [h.state_dict() for h in heads])
-        if run.track == "lora":
-            trained_model.save_pretrained(ckpt, safe_serialization=True)
-        elif experiment.save_full_weights:
-            save_torch(ckpt / "full_weights.pt", trained_model.state_dict())
-        boundaries.append({"task": key, "path": str(ckpt.relative_to(run_dir)),
-                           "projections_sha256": sha})
+        boundary = {"task": key, "path": str(ckpt.relative_to(run_dir))}
+        if not calibration:
+            boundary["projections_sha256"] = export_boundary_projections(
+                trained_model, run.track, ckpt / "projections.pt", identity)
+            save_torch(ckpt / "heads.pt", [h.state_dict() for h in heads])
+            if run.track == "lora":
+                trained_model.save_pretrained(ckpt, safe_serialization=True)
+            elif experiment.save_full_weights:
+                save_torch(ckpt / "full_weights.pt", trained_model.state_dict())
+        boundaries.append(boundary)
         summaries[key]["export_s"] = time.monotonic() - export_start
         logger.info("%s after %s: %s", run.run_id, key, A[ti])
         if ti + 1 < len(run.task_keys):
@@ -292,7 +311,7 @@ def _execute(run, run_dir, data, tokenizer, mspec, experiment, protocol_sha, har
             save_torch(resume_path, {
                 "identity": identity, "protocol_sha256": protocol_sha,
                 "weights": weights, "heads": [h.state_dict() for h in heads],
-                "A": A, "train_summary": summaries, "boundaries": boundaries,
+                "A": A, "NLL": NLL, "train_summary": summaries, "boundaries": boundaries,
                 "flags": flags, "step": step, "next_task": ti + 1,
                 "torch_rng": torch.get_rng_state(),
                 "cuda_rng": torch.cuda.get_rng_state_all() if str(device).startswith("cuda") else [],
@@ -307,19 +326,23 @@ def _execute(run, run_dir, data, tokenizer, mspec, experiment, protocol_sha, har
         "protocol_sha256": protocol_sha, "mode": run.mode,
         "model": mspec.key, "hf_id": mspec.hf_id, "hf_revision": mspec.revision,
         "track": run.track, "rank": run.rank, "alpha": run.alpha,
-        "lr": run.lr, "seed": run.seed, "task_order": list(run.task_keys),
+        "lr": run.lr, "head_lr_multiplier": run.head_lr_multiplier,
+        "declared_lora_lr": experiment.default_lr(run.model, "lora"),
+        "declared_full_lr": experiment.default_lr(run.model, "full"),
+        "seed": run.seed, "task_order": list(run.task_keys),
         "epochs": run.epochs, "train_samples": run.train_samples,
         "d_model": mspec.d_model, "wv_out": mspec.wv_out,
         "batch": {"effective": config.TRAIN_BATCH, "micro": experiment.micro_batch,
                   "accum": experiment.accum, "eval": experiment.eval_batch},
         "optimizer": run.optimizer, "trainable_storage": "float32",
-        "A": A, "metrics": run_metrics, "train_summary": summaries,
+        "A": A, "NLL": NLL, "metrics": run_metrics, "train_summary": summaries,
         "trainable_params": trainable_param_count(trained_model),
         "params": {"total_params": total_param_count(model),
                    "trainable_params": trainable_param_count(trained_model),
                    "heads_params": sum(p.numel() for p in heads.parameters())},
         "checkpoint_sizes": sizes, "checkpoint_total_bytes": sum(sizes.values()),
-        "boundaries": boundaries, "intruder": {}, "intruder_status": "pending_cpu",
+        "boundaries": boundaries, "intruder": {},
+        "intruder_status": "not_requested" if calibration else "pending_cpu",
         "flags": flags, "hardware": hardware,
         "data": {key: data[key].provenance for key in run.task_keys},
         "train_time_s": round(prior_elapsed + timer.elapsed, 3),

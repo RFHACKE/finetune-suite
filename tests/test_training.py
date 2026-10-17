@@ -8,7 +8,7 @@ import pytest
 import torch
 from torch import nn
 
-from rank_suite import config, train
+from rank_suite import config, metrics, train
 from rank_suite.data import TaskData, make_loader
 
 
@@ -53,7 +53,8 @@ def test_exported_adapter_keeps_the_pinned_base_revision():
     assert model.peft_config["default"].revision == cfg._commit_hash
 
 
-def test_accumulation_matches_full_batches_including_unequal_final_microbatch(tmp_path):
+@pytest.mark.parametrize("head_multiplier", [1, 5])
+def test_accumulation_matches_full_batches_including_unequal_final_microbatch(tmp_path, head_multiplier):
     torch.manual_seed(4)
     initial = ToyTransformer()
     initial_head = nn.Linear(4, 2)
@@ -65,7 +66,8 @@ def test_accumulation_matches_full_batches_including_unequal_final_microbatch(tm
         model, head = copy.deepcopy(initial), copy.deepcopy(initial_head)
         loader = make_loader(ds, micro, False, 1, Tokenizer())
         out = train._train_task(model, head, list(model.parameters()) + list(head.parameters()),
-                                loader, 2, .01, "adamw", "cpu", tmp_path / f"{micro}.jsonl", 0, "rte", accum)
+                                loader, 2, .01, "adamw", "cpu", tmp_path / f"{micro}.jsonl", 0, "rte", accum,
+                                head_lr_multiplier=head_multiplier)
         assert out["steps"] == 4
         states.append([p.detach().clone() for p in list(model.parameters()) + list(head.parameters())])
     for state in states[1:]:
@@ -128,6 +130,21 @@ def test_real_tiny_architectures_and_deferred_spectra(family, track, device, mon
     import json
     saved = json.loads((directory / "result.json").read_text())
     assert saved["intruder_status"] == "completed"
+    if family == "qwen2" and track == "lora" and device == "cpu":
+        from rank_suite.analysis import _write_long_tables
+        from rank_suite.measurement_plots import measurement_figures
+        loaded = metrics.load_results(tmp_path, modes=("smoke",))
+        aggregate = tmp_path / "aggregates"
+        aggregate.mkdir()
+        _write_long_tables(loaded, aggregate)
+        import pandas as pd
+        diagnostic = pd.read_csv(aggregate / "spectral_diagnostics_long.csv")
+        assert len(diagnostic) == 6  # both q/v projections at all three boundaries
+        assert (diagnostic["effective_rank"] > 0).all()
+        assert set(diagnostic["subspace_k_actual_20"]) == {8, 16}
+        plots = measurement_figures(metrics.results_dataframe(loaded), loaded, tmp_path)
+        assert len(plots) == 3
+        assert all((tmp_path / name).stat().st_size > 1000 for name in plots)
 
 
 def test_interrupted_run_resumes_identical_predictions(monkeypatch, tmp_path):
@@ -172,3 +189,44 @@ def test_interrupted_run_resumes_identical_predictions(monkeypatch, tmp_path):
         for name in ref:
             for factor in ("A", "B"):
                 torch.testing.assert_close(got[name][factor], ref[name][factor], atol=0, rtol=0)
+
+
+def test_head_lr_groups_preserve_full_ft_moment_precision():
+    matrix = nn.Parameter(torch.ones(256, 16))
+    vector = nn.Parameter(torch.ones(256))
+    head = nn.Linear(256, 2)
+    opt = train.make_optimizer([matrix, vector, *head.parameters()], .0001, 'adamw8bit',
+                                head.parameters(), head_lr_multiplier=5)
+    assert [group['lr'] for group in opt.param_groups] == [.0001, .0005]
+    assert opt.get_config(0, 0, opt.param_groups[0])['optim_bits'] == 8
+    assert opt.get_config(0, 1, opt.param_groups[0])['optim_bits'] == 32
+    assert all(opt.get_config(1, i, opt.param_groups[1])['optim_bits'] == 32 for i in range(2))
+
+
+def test_real_calibration_training_records_nll_and_head_lr_without_large_exports(tmp_path, monkeypatch):
+    from transformers import Qwen2Config, Qwen2ForCausalLM
+    cfg = Qwen2Config(vocab_size=32, hidden_size=16, intermediate_size=32, num_hidden_layers=1,
+                      num_attention_heads=2, num_key_value_heads=1, pad_token_id=0,
+                      max_position_embeddings=64, tie_word_embeddings=True)
+    cfg._attn_implementation = 'sdpa'
+    monkeypatch.setattr(train, 'load_backbone', lambda _: (Qwen2ForCausalLM(cfg), None))
+    mspec = replace(config.MODELS['qwen2.5-1.5b'], d_model=16, layers=1, n_kv=1, head_dim=8, vocab=32)
+    ds = Dataset.from_list([{'input_ids': [1, i % 28 + 3], 'attention_mask': [1, 1], 'labels': i % 2}
+                            for i in range(18)])
+    data = {k: TaskData(config.TASK_BY_KEY[k], ds, ds, list(range(18)), {0: 9, 1: 9})
+            for k in config.TASK_KEYS}
+    run = config.RunSpec(mspec.key, 'lora', 4, .001, 42, mode='lr_test', epochs=1,
+                         train_samples=18, optimizer='adamw', head_lr_multiplier=5)
+    spec = config.ExperimentSpec(models=[mspec.key], optimizer='adamw', mode='lr_test')
+    directory = tmp_path / 'runs' / run.run_id
+    result = train.run_single(run, directory, data, Tokenizer(), mspec,
+                              experiment=spec, protocol_sha='test', device='cpu')
+    assert result['intruder_status'] == 'not_requested'
+    assert np.isfinite(result['NLL'][-1]).all()
+    assert not list(tmp_path.rglob('projections.pt'))
+    assert not list(tmp_path.rglob('adapter_model.safetensors'))
+    assert not (directory / 'resume.pt').exists()
+    import json
+    steps = [json.loads(line) for line in (directory / 'train_log.jsonl').read_text().splitlines()]
+    assert any(step['lr'] > 0 for step in steps)
+    assert all(step['head_lr'] == pytest.approx(5 * step['lr']) for step in steps)

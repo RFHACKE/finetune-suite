@@ -80,24 +80,38 @@ def run_analysis(results_dir: Path, mode: str = "main") -> dict:
 
     results = metrics.load_results(results_dir, modes=(mode,))
     sanity = metrics.load_results(results_dir / "sanity", modes=("sanity",))
+    from .utils import load_json, save_json
+    latest = load_json(results_dir / "lr_test" / "latest.json", {})
+    calibration_report = None
+    if latest:
+        from .calibration_plots import write_report
+        report_path = results_dir / "lr_test" / latest["report"]
+        calibration_report = load_json(report_path)
+        if calibration_report:
+            calibration_report["charts"] = write_report(calibration_report, report_path.parent, results_dir / "lr_test")
+            save_json(report_path, calibration_report)
     if not results:
         logger.warning("No completed runs found under %s", results_dir / "runs")
-        return {"runs": 0}
+        return {"runs": 0, "lr_calibration": latest or None}
 
     df = metrics.results_dataframe(results)
     cfg = metrics.config_summary(df)
     windows = metrics.feasible_windows(cfg, df)
+    all_task_sets = metrics.all_task_feasible_sets(df)
     corrs = metrics.intruder_correlations(df)
 
     _write_table(df, agg_dir / "runs")
     _write_table(cfg, agg_dir / "config_summary")
     _write_long_tables(results, agg_dir)
+    save_json(agg_dir / "all_task_feasible_sets.json", all_task_sets)
+    _write_table(pd_rows([{k: v for k, v in item.items() if k != "details"}
+                         for item in all_task_sets]), agg_dir / "all_task_feasible_sets_summary")
     _write_windows(windows, agg_dir / "feasible_windows")
     _write_corrs(corrs, agg_dir / "intruder_correlations")
     _write_table(pd_rows(metrics.paired_rank_comparisons(df)), agg_dir / "paired_rank_comparisons")
     from .audit import completeness_audit
-    from .utils import save_json
-    audit = completeness_audit(results, mode)
+    policy = load_json(results_dir / "protocol.json", {}).get("learning_rate_defaults")
+    audit = completeness_audit(results, mode, policy)
     import json
     failure_attempts = []
     for path in results_dir.glob("failures*.jsonl"):
@@ -110,9 +124,12 @@ def run_analysis(results_dir: Path, mode: str = "main") -> dict:
     save_json(agg_dir / "completeness.json", audit)
 
     figures = _make_figures(results, df, cfg, windows, corrs, ana_dir)
+    from .measurement_plots import measurement_figures
+    figures += measurement_figures(df, results, ana_dir)
     guidance = _write_rank_guidance(df, windows, agg_dir)
     _write_report(results_dir, df, cfg, windows, corrs, figures, sanity,
-                  guidance, audit=audit)
+                  guidance, audit=audit, all_task_sets=all_task_sets,
+                  calibration_report=calibration_report)
 
     logger.info("Analysis complete: %d runs, %d figures -> %s",
                 len(results), len(figures), ana_dir)
@@ -158,6 +175,35 @@ def _write_long_tables(results, agg_dir: Path):
                     "mean_max_cosine": payload.get("mean_max_cosine"),
                 })
     _write_table(pd_rows(irows), Path(agg_dir) / "intruder_counts_long")
+    task_rows, transition_rows, spectral_rows = [], [], []
+    import re
+    for r in results:
+        identity = {k: r.get(k) for k in ("run_id", "model", "track", "rank", "lr", "seed", "head_lr_multiplier")}
+        for i, task in enumerate(r["task_order"]):
+            task_rows.append({**identity, "task": task, "diagonal_accuracy": r["A"][i][i],
+                "final_accuracy": r["A"][-1][i], "retention_change_pp": (r["A"][-1][i] - r["A"][i][i]) * 100})
+            for j in range(i):
+                transition_rows.append({**identity, "after_task": task, "eval_task": r["task_order"][j],
+                    "change_pp": (r["A"][i][j] - r["A"][i - 1][j]) * 100})
+        for boundary, payload in r.get("intruder", {}).items():
+            for name, diagnostic in payload.get("diagnostics_by_matrix", {}).items():
+                match = re.search(r"layers\.(\d+)", name)
+                layer = int(match[1]) if match else None
+                row = {**identity, "boundary": boundary, "matrix": name,
+                       "matrix_type": name.rsplit(".", 1)[-1], "layer": layer,
+                       "normalized_depth": layer / max(config.MODELS[r["model"]].layers - 1, 1) if layer is not None else None,
+                       **diagnostic["update"]}
+                for target, subspace in diagnostic["subspace"].items():
+                    row[f"subspace_distance_k{target}"] = subspace["distance"]
+                    row[f"subspace_k_actual_{target}"] = subspace["k_actual"]
+                    row[f"max_angle_radians_k{target}"] = max(subspace["principal_angles_radians"])
+                    for side in ("reference", "tuned"):
+                        row[f"{side}_cutoff_gap_relative_k{target}"] = subspace[f"{side}_cutoff_gap"]["relative"]
+                        row[f"{side}_cutoff_near_tie_k{target}"] = subspace[f"{side}_cutoff_gap"]["near_tie"]
+                spectral_rows.append(row)
+    _write_table(pd_rows(task_rows), agg_dir / "per_task_learning_retention")
+    _write_table(pd_rows(transition_rows), agg_dir / "task_transition_changes")
+    _write_table(pd_rows(spectral_rows), agg_dir / "spectral_diagnostics_long")
 
 
 def pd_rows(rows):
@@ -581,7 +627,8 @@ def _fig_track_comparison(plt, df, ana_dir):
                                (axes[i, 1], "final_task_acc", "Final-task accuracy (%)")):
             means, errors, labels = [], [], []
             for rank in [*config.METHODOLOGY_RANKS, None]:
-                track, lr = ("full", m.default_full_lr) if rank is None else ("lora", m.default_lora_lr)
+                track = "full" if rank is None else "lora"
+                lr = metrics.declared_lr(df, model, track)
                 rows = df[(df["model"] == model) & (df["track"] == track)
                           & np.isclose(df["lr"], lr, rtol=1e-10, atol=0)]
                 if rank is not None:
@@ -672,7 +719,7 @@ def _write_rank_guidance(runs_df, windows, agg_dir):
 # Report
 # --------------------------------------------------------------------------
 def _write_report(results_dir, df, cfg, windows, corrs, figures, sanity,
-                  guidance=None, audit=None):
+                  guidance=None, audit=None, all_task_sets=None, calibration_report=None):
     import pandas as pd
 
     lines = []
@@ -688,6 +735,11 @@ def _write_report(results_dir, df, cfg, windows, corrs, figures, sanity,
             "never contribute to main-study conclusions.")
         add("")
     add(f"Results directory: `{results_dir}`  ")
+    if calibration_report:
+        add(f"LR calibration: **{calibration_report['status']}**; active defaults: "
+            f"**{calibration_report['activated']}**. See `lr_test/latest.json` and its linked JSON/Markdown report.")
+        add("Calibration-only runs never enter the main accuracy/rank analysis. Baseline references use the declared, frozen rates.")
+        add("")
     add(f"Completed runs: **{len(df)}** "
         f"(LoRA: {int((df['track'] == 'lora').sum())}, "
         f"full FT: {int((df['track'] == 'full').sum())})")
@@ -738,6 +790,27 @@ def _write_report(results_dir, df, cfg, windows, corrs, figures, sanity,
         add(f"| {w['model']} | {utils_fmt(w['lr'])} | {win} | {rd} | {rw} | {ref} |")
     add("")
 
+    add("### Supplementary all-task learning and retention gates")
+    add("")
+    add("Every task diagonal must be within the fixed tolerance of its matched full-FT diagonal, "
+        "and each earlier task must retain its own post-learning accuracy within that tolerance. "
+        "The full-FT reference must itself beat each validation majority baseline. "
+        "The primary supplementary tolerance is 2pp; 1pp/5pp are sensitivity analyses. "
+        "These operational gates do not replace the original window. JSON also reports Bonferroni "
+        "95% t intervals over 25 constraints within each model/LR family; five seeds give limited power.")
+    add("")
+    add("| Model | LR | 2pp set | Interval-supported set | Status |")
+    add("|---|---|---|---|---|")
+    for item in all_task_sets or []:
+        if item["tolerance_pp"] == 2:
+            add(f"| {item['model']} | {item['lr']:.4g} | {item['window_ranks']} | "
+                f"{item['interval_supported_ranks']} | {item['status']} |")
+    add("")
+    add("All diagonals, final accuracies and transition changes are in `aggregates/per_task_learning_retention.*` "
+        "and `aggregates/task_transition_changes.*`. Per-matrix displacement, effective rank and "
+        "leading-subspace distances at k=10/20 are in `aggregates/spectral_diagnostics_long.*`. "
+        "Near-tied cutoff singular values are flagged; individual-vector intruder counts retain their original definition.")
+    add("")
     add("## 3. Rank selection guidance (RQ4)")
     add("")
     if guidance:

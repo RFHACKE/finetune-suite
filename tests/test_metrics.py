@@ -79,3 +79,32 @@ def test_analysis_recomputes_summary_from_raw_matrix(tmp_path):
          "A": [[.6, None, None], [.8, .7, None], [.5, .6, .9]], "metrics": {"bwt": 999}}
     utils.save_json(tmp_path / "runs" / "stub" / "result.json", r)
     assert metrics.load_results(tmp_path)[0]["metrics"]["bwt"] == pytest.approx(-.1)
+
+
+def test_all_task_gates_reject_bwt_cancellation_and_require_healthy_reference():
+    df = window_data()
+    for task, diagonal, majority in [('rte', .8, .5), ('mnli', .7, 1/3), ('sst2', .9, .5)]:
+        df[f'A_{task}_{task}'] = diagonal
+        df[f'majority_{task}'] = majority
+        df[f'A_sst2_{task}'] = diagonal - (.01 if task != 'sst2' else 0)
+    # An apparently stable average can conceal a five-point MNLI loss.
+    df.loc[df['rank'] == 4, 'A_sst2_rte'] = .85
+    df.loc[df['rank'] == 4, 'A_sst2_mnli'] = .65
+    sets = metrics.all_task_feasible_sets(df)
+    primary = next(s for s in sets if s['tolerance_pp'] == 2)
+    assert primary['status'] == 'complete'
+    assert primary['window_ranks'] == [8, 16, 32, 64]
+    assert primary['interval_supported_ranks'] == [8, 16, 32, 64]
+    df.loc[df.track == 'full', 'A_rte_rte'] = .5
+    assert all(s['window_ranks'] == [] and s['status'] == 'baseline_underlearning'
+               for s in metrics.all_task_feasible_sets(df))
+
+
+def test_calibrated_baseline_anchor_is_used_instead_of_old_nominal():
+    df = window_data()
+    calibrated = config.MODELS['qwen2.5-1.5b'].default_full_lr / 2
+    df.loc[df.track == 'full', 'lr'] = calibrated
+    df['declared_full_lr'] = calibrated
+    window = metrics.feasible_windows(metrics.config_summary(df), df)[0]
+    assert window['status'] == 'complete'
+    assert window['full_ft_reference_lr'] == calibrated

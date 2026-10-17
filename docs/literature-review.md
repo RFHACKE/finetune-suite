@@ -12,7 +12,7 @@ The evidence does not support a universal claim that increasing rank necessarily
 
 Keep the four chosen model identities fixed. Improve measurement and calibration before expanding the model or method grid. The highest-value additions are per-task learning/retention gates, paired uncertainty, update norms and effective rank, subspace diagnostics, and a small head-recovery study. Most can use existing artifacts or a modest amount of extra evaluation.
 
-The following recommendations are proposals. They have not been silently implemented in the experiment suite. Existing controls and results must remain distinguishable from any adopted amendment.
+This review describes the audited frw-v2 baseline. A subsequent user-authorized implementation adopts per-task gates, LR/head calibration, update-capacity measurements and subspace diagnostics in the [frw-v3 amendment](https://github.com/RFHACKE/finetune-suite/blob/main/docs/PROTOCOL_V3.md). Remaining recommendations are proposals. Existing controls and results remain distinguishable from the amendment; no production experiment results are claimed.
 
 ## 1. Scope, search approach and strength of evidence
 
@@ -239,7 +239,7 @@ Hwang et al. [57] provide relevant sub-3B NLI feasibility evidence under their o
 
 ## 9. Improvement tables: exact proposals, benefits and disadvantages
 
-Priority P1 means the best return for this FYP; P2 means a targeted follow-up after the core design is sound; P3 means optional future work. “New” identifies work absent from the current suite. “Extend” means the suite already supplies part of the measurement. These are design recommendations and candidate values, not claims of demonstrated improvement.
+Priority P1 means the best return for this FYP; P2 means a targeted follow-up after the core design is sound; P3 means optional future work. “New” identifies work absent from the reviewed v2 baseline. “Extend” means that baseline already supplies part of the measurement. The subsequent v3 implementation is identified in the executive assessment and protocol amendment. These are design recommendations and candidate values, not claims of demonstrated improvement.
 
 Cost categories refer to additional work: CPU means analysis of already saved artifacts; evaluation means additional forward passes; calibration means isolated training-only checks; cohort means additional experimental training. Actual dollars require measured timings and the current rental quote. Preserve existing primary outcomes even when adding richer secondary measurements.
 

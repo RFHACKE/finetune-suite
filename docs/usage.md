@@ -1,6 +1,8 @@
 # Using `run.sh`
 
-`run.sh` launches the Feasible Rank Window suite. It changes to the repository directory, activates `.venv` when present, and forwards arguments to `rank_suite.cli`. With no arguments it prints help. Training starts when you select `run`.
+`run.sh` launches the Feasible Rank Window suite. It changes to the repository directory, activates `.venv` when present, and forwards arguments to `rank_suite.cli`. With no arguments it prints help. `run` starts the selected workload; `run --test-lr` performs calibration only and then exits. The shortcut `./run.sh --test-lr ...` is also accepted.
+
+Current experiments use protocol `frw-v3`. Use a fresh results directory for this amendment; v2 training results and controls cannot be pooled with v3. The four checkpoint identities remain fixed.
 
 For every accepted flag, including defaults and command-specific differences, see the [complete CLI option reference](#11-complete-cli-option-reference). The earlier sections provide the end-to-end workflow.
 
@@ -46,11 +48,17 @@ These commands print the selected workload without downloading models or startin
 
 The default main design has **120 three-task sequences**: four models × (five LoRA ranks + one full-FT baseline) × five seeds. Each sequence learns RTE → MNLI Matched → SST-2. Planning needs only Python's standard library; the launcher still needs an available `python`, normally supplied by `.venv` after setup.
 
-Start with a small software check, then measure production-size pilots:
+Start with a small software check, calibrate defaults, then measure production-size pilots. Keep pre-calibration smoke results in their own root:
 
 ```bash
 # Tiny diagnostic: both tracks, reduced data, isolated results.
-./run.sh run --mode smoke --models qwen2.5-1.5b --output results
+./run.sh run --mode smoke --models qwen2.5-1.5b --output results-check
+
+# Inspect calibration cost in work units before starting it.
+./run.sh plan --test-lr --output results
+
+# Select and save per-model/track LR and head defaults; exits after calibration.
+./run.sh --test-lr --output results
 
 # Largest model: full-length r=16 and full-FT configurations.
 ./run.sh run --mode pilot --models qwen2.5-3b --output results
@@ -86,6 +94,8 @@ Completed pilots are reused by `main` with the same output and controls. Smoke a
 
 `--models` accepts these keys or exact checkpoint IDs, separated by spaces. Other checkpoints are rejected. `--track` accepts `lora`, `full`, or `both` (default).
 
+The table contains fallback research priors. After a completed `--test-lr`, `plan` and `run` automatically use the selected rates in `<output>/lr_defaults.json`. `list-models` continues to show registry priors. Main analysis anchors full-FT comparisons to the frozen selected baseline, without selecting its LR from main validation outcomes.
+
 ```bash
 # One model's complete rank sweep and baseline.
 ./run.sh run --models qwen2.5-1.5b --track both --output results
@@ -114,6 +124,7 @@ Main defaults are ranks `4 8 16 32 64` and seeds `42 123 456 789 1024`. Subsets 
 | `--deterministic` | Off | Requests strict deterministic algorithms; keep the policy fixed within a cohort. |
 | `--save-full-weights` | Off | Also retains full-FT backbone weights at every boundary; substantial disk use. Exact q/v snapshots are always saved. |
 | `--lora-lrs` / `--full-lrs` | Model defaults above | Explicit sensitivity rates, either common or model-specific. |
+| `--head-lr-multiplier` | Calibrated value, otherwise `1` | Positive finite head/backbone LR ratio. An explicit value overrides the selected head ratio and must be fixed before main training. |
 
 Plan a different batch partition before starting its own cohort:
 
@@ -226,8 +237,8 @@ Solvers have separate caches, but a pass replaces each run's active spectral sum
 For the isolated smoke diagnostic, select its directory explicitly:
 
 ```bash
-./run.sh intruders --output results/smoke --models qwen2.5-1.5b --threads 4
-./run.sh analyze --output results/smoke --mode smoke
+./run.sh intruders --output results-check/smoke --models qwen2.5-1.5b --threads 4
+./run.sh analyze --output results-check/smoke --mode smoke
 ```
 
 Read `results/aggregates/completeness.json` and `results/analysis/report.md` first. Outputs include CSV/JSON tables, figures, accuracy matrices, BWT, peak forgetting, seed variability, paired comparisons, feasible-rank sets, and intruder summaries. Partial grids remain descriptive and cannot certify a complete window.
@@ -236,6 +247,8 @@ Read `results/aggregates/completeness.json` and `results/analysis/report.md` fir
 
 ```text
 results/
+  lr_defaults.json              # activated calibration choices and evidence identity
+  lr_test/                      # isolated calibration runs, plans, JSON reports and charts
   protocol.json, software.json   # immutable scientific/software identity
   hardware/<model>.json          # GPU type per model
   invocations/*.json             # environment and launch provenance
@@ -253,7 +266,7 @@ results/
       full_weights.pt           # only with --save-full-weights
       spectra/<analysis-id>/matrices.json
   cache/projections/            # pretrained q/v weights needed on CPU
-  cache/spectra-v2/              # cached pretrained singular vectors
+  cache/spectra-v3/              # cached pretrained vectors and singular values
   aggregates/, analysis/        # tables, audit, figures, report
   smoke/, sanity/               # isolated diagnostic cohorts
 ```
@@ -318,14 +331,16 @@ Every option in this table is accepted by both commands. `plan` validates config
 
 | Option and value | Effective default | Meaning, accepted values, and constraints |
 |---|---|---|
+| `--test-lr` | Off | Select LR/head defaults on training-only holdouts, save JSON/charts, and exit without main training. `plan --test-lr` prints the calibration plan. Shortcut: `./run.sh --test-lr`. See Section 13 for the selection rule and option interactions. |
+| `--head-lr-multiplier MULTIPLIER` | Calibrated value, otherwise `1` | Finite positive classifier-head/backbone LR ratio. Examples: `--head-lr-multiplier 5`; `run --test-lr --head-lr-multiplier 1` searches LRs with the head ratio fixed instead of searching `{1,5}`. |
 | `--models MODEL ...` | All four fixed models. | Registry keys or exact checkpoint IDs from Section 3, separated by spaces. Duplicates are removed. Other checkpoints are rejected. Example: `--models llama3.2-1b qwen2.5-3b`. |
 | `--output PATH` | `results` | Experiment directory. Relative paths resolve from the repository directory because the launcher changes there. Absolute paths are accepted, for example `--output /workspace/fyp-results`. Main/pilot use it directly; smoke/sanity append their own subdirectory. |
 | `--track TRACK` | `both` | Choose `lora`, `full`, or `both`. `full` means all non-embedding backbone weights plus the current task head; token embeddings stay frozen. Ranks apply to LoRA only. |
 | `--mode MODE` | `main` | Choose `main`, `pilot`, `sanity`, or `smoke`. Pilot/smoke force rank 16 and seed 42. Sanity additionally forces its preset LR comparisons and RTE training holdout. See Section 2 for data, epoch, and output differences. |
 | `--ranks RANK ...` | `4 8 16 32 64` | Positive integers, separated by spaces or commas; duplicates are removed. A rank cannot exceed the smallest `v_proj` output width among selected models: 256 when either Qwen is selected, 512 for a Llama/Granite-only selection. Other valid ranks are sensitivity experiments; the main window requires the prescribed grid. Pilot/smoke/sanity use rank 16 instead. |
 | `--seeds SEED ...` | `42 123 456 789 1024` | Integers from `0` through `4294967295`, separated by spaces or commas; main-grid duplicates are removed. Pilot/smoke/sanity use seed 42 instead. The main window requires the five prescribed seeds. |
-| `--lora-lrs RATE ...` | Nominal per-model LoRA rates in Section 3. | Finite positive rates, using decimal or scientific notation. Supply a common list (`--lora-lrs 1e-4 2e-4`) or scoped lists (`--lora-lrs qwen2.5-1.5b=1e-4,1.85e-4`). Scoped names must be selected registry keys, even if `--models` uses exact checkpoint IDs. Sanity uses its preset comparisons instead. |
-| `--full-lrs RATE ...` | Nominal per-model full-FT rates in Section 3. | Same syntax and positivity rules as `--lora-lrs`, for the full track. A model's nominal rate must be present to provide the required window baseline. Example: `--full-lrs qwen2.5-1.5b=1e-5,1.85e-5`. Sanity uses nominal and twice-nominal rates instead. |
+| `--lora-lrs RATE ...` | Calibrated cohort rate, otherwise the Section 3 prior. | Finite positive rates, using decimal or scientific notation. Supply a common list (`--lora-lrs 1e-4 2e-4`) or scoped lists (`--lora-lrs qwen2.5-1.5b=1e-4,1.85e-4`). Scoped names must be selected registry keys, even if `--models` uses exact checkpoint IDs. Sanity uses its preset comparisons instead. |
+| `--full-lrs RATE ...` | Calibrated cohort rate, otherwise the Section 3 prior. | Same syntax and positivity rules as `--lora-lrs`, for the full track. A model's nominal rate must be present to provide the required window baseline. Example: `--full-lrs qwen2.5-1.5b=1e-5,1.85e-5`. Sanity uses nominal and twice-nominal rates instead. |
 | `--optimizer POLICY` | `standard` | `standard`: fp32 AdamW moments for LoRA, 8-bit dense-matrix moments with fp32 head/vector overrides for full FT. `adamw`: fp32 moments in both tracks. A changed policy requires a separate output cohort. This option does not quantize model weights. |
 | `--micro-batch N` | `4` | Positive integer divisor of 16: `1`, `2`, `4`, `8`, or `16`. Used for all tracks/ranks in the cohort. A changed partition requires a new output directory. |
 | `--accum N` | `16 / micro_batch`; normally `4`. | Positive integer accumulation count. If specified, `micro_batch × accum` must equal 16. Examples: `--micro-batch 8 --accum 2`, or `--micro-batch 2 --accum 8`. |
@@ -376,7 +391,7 @@ Also accepts `-h` and `--help`. It supports CPU preparation and has no `--cpu` o
 | Option and value | Default | Meaning and example |
 |---|---|---|
 | `--models MODEL ...` | All four fixed models. | Analyze saved results only for these registry keys/exact checkpoint IDs. Example: `--models qwen2.5-1.5b qwen2.5-3b`. |
-| `--output PATH` | `results` | Exact results root to read, including its runs and projection cache. Unlike `run --mode smoke`, this command does not append a mode directory. Use `--output results/smoke` for smoke artifacts. |
+| `--output PATH` | `results` | Exact results root to read, including its runs and projection cache. Unlike `run --mode smoke`, this command does not append a mode directory. Use `--output results-check/smoke` for smoke artifacts. |
 | `--threads N` | `4` | Positive integer CPU thread count used by Torch and the BLAS thread limiter. Example: `--threads 8`. This is not a GPU count. |
 | `--solver SOLVER` | `eigh` | Choose `eigh` (float64 Gram eigendecomposition for leading tuned vectors) or `svd` (direct fp32 SVD cross-check). Caches are separated, but active run summaries are replaced; complete a consistent pass. Example: `./run.sh intruders --output results --threads 4 --solver svd`. |
 
@@ -389,7 +404,7 @@ Also accepts `-h` and `--help`. Spectral analysis is CPU-based; there is no `--c
 | Option and value | Default | Meaning and example |
 |---|---|---|
 | `--output PATH` | `results` | Exact results root for aggregates and figures. Does not append a mode directory. Example: `./run.sh analyze --output results`. |
-| `--mode MODE` | `main` | Only `main` or `smoke` are accepted. Filters results by their stored mode; a pilot is stored as a reusable main configuration. Use `./run.sh analyze --output results/smoke --mode smoke` for smoke reports. Main-root analysis also reads available sanity results from its `sanity/` child. |
+| `--mode MODE` | `main` | Only `main` or `smoke` are accepted. Filters results by their stored mode; a pilot is stored as a reusable main configuration. Use `./run.sh analyze --output results-check/smoke --mode smoke` for smoke reports. Main-root analysis also reads available sanity results from its `sanity/` child. |
 
 Also accepts `-h` and `--help`. There is no model-selection flag here: analyze the compatible completed results in the selected root. A standalone `--mode sanity` or `--mode pilot` is not supported.
 
@@ -426,3 +441,91 @@ These belong to other launchers or the shell; do not pass them to `run.sh` as ad
 | `HF_HOME` | Hugging Face library default unless exported. | Selects the external model cache location; it is not the experiment's `--output` directory. |
 | `WORKER_LOG_DIR` | `logs/parallel`. | Overrides the parallel launcher's worker-log directory. |
 | `PYTHON` | Automatically chosen by `setup.sh` unless supplied. | A supported Python interpreter for setup, such as `PYTHON=python3.11 ./setup.sh`. It is a setup variable; `run.sh` launches its activated environment's `python`. |
+
+## 13. Identify learning rates with `--test-lr`
+
+Run this **before the first main/pilot launch** in a fresh output directory:
+
+```bash
+./run.sh plan --test-lr --output results-v3
+./run.sh --test-lr --output results-v3 --hourly-rate 0.40
+./run.sh plan --output results-v3
+./run.sh run --mode pilot --models qwen2.5-3b --output results-v3
+./run.sh run --output results-v3
+```
+
+`0.40` is an example hourly rate; replace it with the actual rental quote. Calibration requires the same memory policy as training, including enough VRAM for the largest full-FT baseline. Largest models and full FT are tested first to expose fit problems early. Calibration ends after selecting defaults; it does not automatically start the 120-sequence main study.
+
+The bounded search follows this declared procedure:
+
+1. For each selected model and track, test `{0.5,1,2}` times its Section 3 prior, with classifier-head LR multipliers `{1,5}`. Use rank 16 for LoRA, three epochs, and seed 42. Screening trains on 1,992 RTE training examples and evaluates the disjoint, stratified 498-example training holdout.
+2. Keep the best head multiplier for each LR, then the two best **distinct rates**. Screening orders accuracy first, then lower NLL, lower LR and lower head multiplier.
+3. Train each finalist from the pinned base through RTE → MNLI → SST-2 at seeds 42 and 123. Each task uses its own fixed 80/20 split inside its 2,490 training examples. Evaluate all previously learned tasks after each boundary. The official validation sets never participate in selection.
+4. A candidate is eligible only when its mean diagonal accuracy exceeds the holdout majority baseline on **every task**. Select the highest mean final-row accuracy across tasks and seeds; ties use higher mean diagonal, lower mean final NLL, lower LR, then lower head multiplier. BWT, individual seed scores and sample SD remain visible.
+5. Diagnose the chosen LoRA setting at ranks 4 and 64 on the RTE holdout using seed 42. Underlearning is reported rather than deleting ranks; numerical instability prevents activation. The chosen LR/head policy remains common across main LoRA ranks.
+6. Activate defaults only after the entire requested scope completes and its charts/report are saved. A budget stop, incomplete run, infrastructure failure or missing eligible candidate leaves defaults unmodified. These are the best tested settings under this selection rule, with no guarantee of a global or every-task optimum. Search-boundary warnings identify winners at the edge of the tested LR grid.
+
+The default all-four-model, both-track search has **48 screening runs + 32 three-task confirmation runs + 8 endpoint checks = at most 88 calibration runs**, or 57,000 optimizer updates. That is about 34% of the main grid's update count, **not** a wall-time or dollar percentage: full FT has different costs. Calibration exports predictions, metrics and step logs, and temporary recovery states while incomplete; it omits large permanent adapter/projection/full-weight exports and spectral decomposition.
+
+Accepted option interactions:
+
+| Option | Meaning during `--test-lr` |
+|---|---|
+| `--models`, `--track` | Select the calibration scope; omitted means all four models and both tracks. Defaults are activated atomically for the requested scope. |
+| `--lora-lrs`, `--full-lrs` | Replace that model/track's three-point candidate grid; require at least two distinct positive finite rates. Use the same global or model-scoped syntax as normal runs. |
+| `--head-lr-multiplier` | Fix one head ratio instead of searching `{1,5}`. |
+| `--seeds` | Confirmation seeds; default **42 and 123** here. Require at least two distinct valid seeds. The first is used for screening and endpoint checks. Normal main defaults remain five seeds. |
+| `--ranks` | Rejected: selection uses rank 16 and endpoint diagnostics use ranks 4/64. |
+| `--mode` | Must remain `main` (default); calibration is isolated automatically, not a main run. |
+| `--micro-batch`, `--accum`, `--eval-batch`, `--optimizer`, `--deterministic` | Apply to calibration and must match the later main cohort. |
+| `--budget`, `--reserve`, `--hourly-rate`, `--max-hours` | Same per-invocation admission limits; finish an admitted case before stopping. An unmeasured case may overrun. They do not stop the rental, and a later main invocation has its own allowance. |
+| `--force` | Rerun calibration cases instead of reusing completed/recorded numerically unstable cases. Existing main controls still prevent recalibration in that root. |
+| `--keep-going` | Record infrastructure failures and attempt remaining cases. Any such failure prevents activation; rerun to retry failed cases. Numerical divergence is recorded separately as an unstable candidate. |
+| `--dry-run` | Print the calibration plan and exit. Also available as `plan --test-lr`. |
+| `--num-shards`, `--shard-index` | Must be `1` and `0`: calibration uses one worker. Run the main study across GPUs after calibration. |
+| `--save-full-weights` | No permanent calibration weight exports; this switch applies to main runs. Temporary recovery states are still retained until each calibration sequence completes. |
+| `--output` | Cohort root for defaults; evidence goes in its `lr_test/` child. |
+
+Reviewable artifacts:
+
+```text
+results-v3/
+  lr_defaults.json                       # selected LR/head ratio for every calibrated model/track
+  lr_test/
+    latest.json                          # relative pointer to the latest report
+    protocol.json, software.json          # calibration controls/environment
+    data/calibration/data_selection_*.json # explicit disjoint train/holdout source indices
+    batches/*.json                       # invocation timing/cost records
+    runs/<run_id>/
+      result.json                        # A, NLL, BWT, data provenance, flags and task summaries
+      train_log.jsonl                    # step loss, adapter/backbone LR, head LR, gradient norm
+      checkpoints/task*/predictions_*.npz
+    experiments/<calibration_id>/
+      plan.json
+      report.json                        # every trial, finalist, seed score, winner and endpoint check
+      report.md
+      charts/screen_*.png                 # LR/head-rate accuracy and NLL curves
+      charts/confirmation_*.png           # finalist scores/seed SD and learning-retention scatter
+      charts/selected_matrix_*.png        # full selected-candidate accuracy matrix
+      charts/selected_loss_*.png          # selected-candidate training curves
+```
+
+Re-running the same `--test-lr` resumes its completed cases. Repeats of an activated selection write a new report identity, preserving the previous active evidence until replacement succeeds. `./run.sh analyze --output results-v3` can regenerate the latest calibration charts on CPU, even before main results exist. Calibration cases are always excluded from main aggregation, completeness counts and spectral passes.
+
+Selected defaults are **local to the output cohort**, so subsequent `plan`, `run` and parallel workers using that `--output` load them automatically. Preserve `lr_defaults.json` together with `lr_test/`; matching completed evidence and code/training controls are validated. Explicit main LR lists are sensitivity settings; they do not change the declared baseline anchor. Defaults cannot be retuned after main/pilot controls are written. Use a new output root for a new calibration policy or scientific/numerical cohort.
+
+## 14. New measurement outputs
+
+`analyze` retains the original methodology window and additionally writes:
+
+| Output under `aggregates/` | Content |
+|---|---|
+| `per_task_learning_retention.csv/json` | Every diagonal, final accuracy and per-task retention change. |
+| `task_transition_changes.csv/json` | Each earlier task's change at every successive boundary. |
+| `all_task_feasible_sets.json` | Per-task learning/retention constraints, 1/2/5pp tolerance sets, health/completeness checks and paired simultaneous intervals. |
+| `all_task_feasible_sets_summary.csv/json` | Compact gate membership and interval decisions. |
+| `spectral_diagnostics_long.csv/json` | Per-matrix relative update size, spectral norm, stable/entropy effective rank, 90% energy rank and leading-subspace distances/angles/gaps at k=10 and 20. |
+
+The 2pp supplementary set requires all three mean diagonals within 2pp of the frozen full-FT reference and both earlier-task final-minus-diagonal changes at least −2pp. It requires all five ranks/seeds, a complete baseline, and a baseline that beats the majority accuracy on every task. The original SD-dependent window remains separately available. Intervals use paired seed differences and a Bonferroni 25-constraint family within each model/LR; they assume independent approximately normal seed differences and may remain inconclusive.
+
+Run `intruders` first to calculate new spectral measurements from boundary snapshots on CPU. LoRA update spectra use thin QR and an r×r SVD; full-FT update spectra need dense CPU decompositions. Effective rank uses singular-value probabilities, stable rank uses squared energy, and zero updates are explicitly flagged. Leading-subspace distance compares the leading reference/tuned spans, while the original intruder detector continues to compare individual tuned vectors with all base vectors. Cutoff relative gaps below `1e-3` are flagged as near ties. Charts include per-task gates, update/capacity/subspace curves and k=10/20 sensitivity; matrices are averaged within each run before seed variability is displayed.

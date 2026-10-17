@@ -22,7 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import config
+from . import config, metrics
 
 PP = 100.0
 TASKS = list(config.TASK_KEYS)
@@ -81,7 +81,7 @@ def lora_configs(runs_df):
 def full_ft_ref(runs_df, model):
     """The declared baseline, only after all five seeds; never select its LR by outcome."""
     full = runs_df[(runs_df["track"] == "full") & (runs_df["model"] == model)]
-    full = full[np.isclose(full["lr"], config.MODELS[model].default_full_lr, rtol=1e-10, atol=0)]
+    full = full[np.isclose(full["lr"], metrics.declared_lr(runs_df, model, "full"), rtol=1e-10, atol=0)]
     if len(full) != 5 or set(full["seed"]) != set(config.DEFAULT_SEEDS):
         return None
     return float(full["final_task_acc"].mean())
@@ -674,7 +674,7 @@ def fig_cross_model_normalized(plt, runs_df, out_dir):
     """All models on the r/d_model axis — the RQ2 convention (Lun & Ming).
     Normalized units; NOT a raw performance comparison."""
     sub = runs_df[(runs_df["track"] == "lora") & runs_df["d_model"].notna()]
-    sub = sub[sub.apply(lambda row: np.isclose(row["lr"], config.MODELS[row["model"]].default_lora_lr,
+    sub = sub[sub.apply(lambda row: np.isclose(row["lr"], metrics.declared_lr(runs_df, row["model"], "lora"),
                                               rtol=1e-10, atol=0), axis=1)]
     if sub.empty:
         return None
@@ -703,7 +703,7 @@ def fig_cross_model_normalized(plt, runs_df, out_dir):
 
 def fig_full_ft_anchors(plt, runs_df, out_dir):
     full = runs_df[runs_df["track"] == "full"]
-    full = full[full.apply(lambda row: np.isclose(row["lr"], config.MODELS[row["model"]].default_full_lr,
+    full = full[full.apply(lambda row: np.isclose(row["lr"], metrics.declared_lr(runs_df, row["model"], "full"),
                                                 rtol=1e-10, atol=0), axis=1)]
     if full.empty:
         return None

@@ -121,10 +121,11 @@ def prepare_task_data(
     for key in task_keys:
         spec = config.TASK_BY_KEY[key]
         raw = load_dataset("nyu-mll/glue", spec.glue_name, revision=config.DATA_REVISION)
-        train_split, eval_split = raw["train"], raw[spec.eval_split]
+        train_split = raw["train"]
+        eval_split = None if calibration else raw[spec.eval_split]
 
         indices = _draw_indices(len(train_split), n_train, data_seed)
-        train_raw = train_split.select(indices)
+        train_raw = train_split.select(indices).add_column("__source_index", indices)
 
         # Sensitivity runs never inspect the official validation set. The split is
         # stratified inside the fixed training subset, independently of run seeds.
@@ -132,6 +133,8 @@ def prepare_task_data(
             holdout = train_raw.train_test_split(test_size=0.2, seed=config.DATA_SEED,
                                                 stratify_by_column="label")
             train_raw, eval_split = holdout["train"], holdout["test"]
+        actual_training_indices = list(train_raw["__source_index"])
+        holdout_indices = list(eval_split["__source_index"]) if calibration else []
 
         label_counts = {}
         for lab in train_raw["label"]:
@@ -159,6 +162,8 @@ def prepare_task_data(
             fingerprint=getattr(train_ds, "_fingerprint", ""),
             provenance={"dataset": "nyu-mll/glue", "revision": config.DATA_REVISION,
                         "selected_indices_sha256": digest(indices),
+                        "training_indices_sha256": digest(actual_training_indices),
+                        "holdout_indices_sha256": digest(holdout_indices) if calibration else None,
                         "encoding": config.ENCODING_VERSION,
                         "train_fingerprint": getattr(train_ds, "_fingerprint", ""),
                         "eval_fingerprint": getattr(eval_ds, "_fingerprint", ""),
@@ -185,6 +190,8 @@ def prepare_task_data(
                     "data_seed": data_seed,
                     "n_selected": len(indices),
                     "selected_indices": indices,
+                    "training_indices": actual_training_indices,
+                    "holdout_indices": holdout_indices,
                     "label_counts": label_counts,
                     "eval_split": "train_holdout_20_percent" if calibration else spec.eval_split,
                     "eval_size": td.n_eval,

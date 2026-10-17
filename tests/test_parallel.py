@@ -26,3 +26,17 @@ def test_parallel_preserves_status_of_instantly_completed_workers(tmp_path, seco
 def test_parallel_failure_stops_a_running_peer(tmp_path):
     result = launcher(tmp_path, 'if [ "$CUDA_VISIBLE_DEVICES" = 0 ]; then exec sleep 30; fi\nexit 7')
     assert result.returncode == 7, result.stdout + result.stderr
+
+
+def test_parallel_rejects_calibration_before_spawning_workers(tmp_path):
+    source = Path(__file__).resolve().parents[1] / 'run_parallel.sh'
+    shutil.copyfile(source, tmp_path / 'run_parallel.sh')
+    marker = tmp_path / 'worker-was-started'
+    worker = tmp_path / 'run.sh'
+    worker.write_text('#!/usr/bin/env bash\ntouch worker-was-started\n')
+    worker.chmod(0o755)
+    result = subprocess.run(['bash', str(tmp_path / 'run_parallel.sh'), '0,1', '--test-lr'],
+                            capture_output=True, text=True, timeout=8)
+    assert result.returncode == 2
+    assert 'calibration' in result.stderr
+    assert not marker.exists()

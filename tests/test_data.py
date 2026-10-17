@@ -32,6 +32,12 @@ def test_training_holdout_never_reads_official_validation(monkeypatch, tmp_path)
     td = prepare_task_data(tok, task_keys=["rte"], n_train=40,
                             selection_dir=tmp_path / "calibration", calibration=True)["rte"]
     assert (td.n_train, td.n_eval) == (32, 8)
+    from rank_suite.utils import load_json
+    selection = load_json(tmp_path / "calibration/data_selection_rte.json")
+    assert len(selection["training_indices"]) == 32
+    assert len(selection["holdout_indices"]) == 8
+    assert not set(selection["training_indices"]) & set(selection["holdout_indices"])
+    assert set(selection["training_indices"]) | set(selection["holdout_indices"]) == set(selection["selected_indices"])
     assert calls[0]["revision"] == config.DATA_REVISION
     eval_marker = tok.convert_tokens_to_ids("evalmarker")
     assert all(eval_marker not in row["input_ids"] for row in td.eval_dataset)

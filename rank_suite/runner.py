@@ -19,7 +19,8 @@ def build_grid(spec):
     def add(model, track, rank, lr, seed, **kw):
         optimizer = "adamw8bit" if spec.optimizer == "standard" and track == "full" else "adamw"
         runs.append(config.RunSpec(model, track, rank, lr, seed,
-                                    optimizer=optimizer, **kw))
+                                    optimizer=optimizer,
+                                    head_lr_multiplier=spec.resolved_head_multiplier(model, track), **kw))
     for model in spec.models:
         m = config.MODELS[model]
         if spec.mode == "sanity":
@@ -104,7 +105,13 @@ def run_all(spec):
         return {"completed": 0, "skipped": 0, "failed": 0, "grid": estimate_workload(grid)}
     runtime_spec = replace(spec, output_dir=str(root))
     env = utils.capture_environment()
-    protocol_sha = register_invocation(root, runtime_spec, env)
+    with file_lock(Path(spec.output_dir) / "defaults.lock", blocking=False, shared=True) as acquired:
+        if not acquired:
+            raise ValueError("LR calibration is running in this output directory; finish it before main training")
+        from .lr_defaults import load_defaults
+        if load_defaults(spec) != (spec.calibrated_defaults or {}):
+            raise ValueError("LR defaults changed during launch; rerun this command to load them")
+        protocol_sha = register_invocation(root, runtime_spec, env)
     start = time.monotonic()
     limit = scheduling_limit_hours(spec)
     summary = {"completed": 0, "skipped": 0, "failed": 0, "locked": 0,

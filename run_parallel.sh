@@ -12,6 +12,12 @@ if [ "$#" -lt 1 ]; then
 fi
 IFS=',' read -r -a GPU_IDS <<< "$1"
 shift
+for option in "$@"; do
+    if [ "$option" = "--test-lr" ]; then
+        echo 'Run LR calibration with ./run.sh --test-lr first; parallel workers are for the main grid.' >&2
+        exit 2
+    fi
+done
 if [ "${#GPU_IDS[@]}" -eq 0 ]; then exit 2; fi
 declare -A SEEN
 for gpu_id in "${GPU_IDS[@]}"; do

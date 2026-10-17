@@ -53,3 +53,5 @@ python3 tools/build_literature_review.py
 ```
 
 The builder writes the root `literature-review.docx` and extracts all 28 proposals into `docs/RESEARCH_IMPROVEMENTS.md`. It checks citation coverage, source identifiers, recommendation counts and table structure. It does not execute experiments or change their controls.
+
+Subsequent implementation: the user authorized all five summarized improvements. The [frw-v3 amendment](PROTOCOL_V3.md) implements per-task gates, LR/head calibration, update norms/effective rank and leading-subspace diagnostics. Other candidate interventions remain proposals; the review tables label their original v2 baseline status.
