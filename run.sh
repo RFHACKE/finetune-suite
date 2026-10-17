@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Thin launcher: activates the venv created by setup.sh and forwards all
-# arguments to the suite CLI. With no arguments it starts the interactive
-# setup prompts.
+# arguments to the suite CLI. With no arguments it prints command help.
 set -euo pipefail
 cd "$(dirname "$0")"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
