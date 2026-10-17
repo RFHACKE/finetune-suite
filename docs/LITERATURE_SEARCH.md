@@ -1,6 +1,6 @@
 # Literature search and source audit
 
-Review date: 17 October 2026. The expanded review is [literature-review.md](literature-review.md); its Word deliverable is [literature-review.docx](../literature-review.docx). Source records and access qualifications are in [literature_sources.tsv](literature_sources.tsv). The TSV is tab-separated UTF-8 and can be opened in a spreadsheet.
+Review date: 17 October 2026. The expanded review is [literature-review.md](literature-review.md); its Word deliverable, `literature-review.docx`, is generated locally and excluded from Git. Source records and access qualifications are in [literature_sources.tsv](literature_sources.tsv). The TSV is tab-separated UTF-8 and can be opened in a spreadsheet.
 
 This was a structured critical scoping review, not a registered systematic review or an exhaustive census. No PRISMA screening totals, database hit counts, independent reviewer agreement, or formal risk-of-bias scores were manufactured. The 62 reference records include papers, official model/implementation documentation, historical bibliography, and two restricted manuscript leads. They are not 62 independently replicated findings or 62 papers all read cover to cover.
 

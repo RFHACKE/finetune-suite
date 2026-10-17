@@ -51,7 +51,6 @@ datasets/
 *.log
 logs/
 *.docx
-!literature-review.docx
 # Keep the two source research documents in the published project.
 proposal/*
 !proposal/fyp-proposal.docx

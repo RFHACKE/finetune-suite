@@ -60,7 +60,7 @@ Model/tokenizer/data revisions, protocol, source hashes, package freeze and hard
 
 ## Research notes and validation
 
-- [Expanded literature review (Word)](literature-review.docx)
+- [Expanded literature review](docs/literature-review.md)
 - [Research improvements and candidate hyperparameters](docs/RESEARCH_IMPROVEMENTS.md)
 - [Literature review and corrections](docs/LITERATURE_REVIEW.md)
 - [Executable protocol amendment](docs/PROTOCOL_V2.md)

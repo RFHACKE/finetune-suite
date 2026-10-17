@@ -2,7 +2,7 @@
 
 Current implementation: see the [frw-v3 amendment](PROTOCOL_V3.md) for LR/head selection and the five adopted measurement improvements. The v2 notes below are preserved as design history.
 
-The expanded review and recommendation tables are now available in [literature-review.docx](../literature-review.docx), [the editable review](literature-review.md), and [the improvement tables](RESEARCH_IMPROVEMENTS.md). The notes below preserve the earlier suite-design review; source access and newer related work are qualified in [the expanded search record](LITERATURE_SEARCH.md).
+The expanded review and recommendation tables are available in [the editable review](literature-review.md) and [the improvement tables](RESEARCH_IMPROVEMENTS.md). The Word review can be generated locally using the [build instructions](LITERATURE_SEARCH.md#rebuilding-the-documents) and is excluded from Git. The notes below preserve the earlier suite-design review; source access and newer related work are qualified in [the expanded search record](LITERATURE_SEARCH.md).
 
 Reviewed 17 October 2026 against both supplied DOCX files and primary sources. The original proposal motivates the study; methodology v1.1 supersedes its model selection. The four selected base checkpoints are preserved. This review separates published observations from choices made for this experiment. No experimental result is claimed here.
 

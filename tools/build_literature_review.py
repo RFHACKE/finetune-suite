@@ -310,7 +310,7 @@ def make_recommendations(markdown, sources):
     selected = selected.split("\n", 1)[1]
     selected = re.sub(r"<!-- (?:landscape|portrait) -->\n?", "", selected)
     out = "# Research improvements and candidate hyperparameters\n\n"
-    out += "Extracted from the [full literature review](literature-review.md) and [Word review](../literature-review.docx), reviewed 17 October 2026. The four selected base models remain fixed. Selected measurement and LR/head-calibration proposals are implemented in [frw-v3](PROTOCOL_V3.md); the remaining entries are optional proposals. New/Extend statuses describe the reviewed v2 baseline.\n\n"
+    out += "Extracted from the [full literature review](literature-review.md), reviewed 17 October 2026. A Word copy can be generated locally using the [build instructions](LITERATURE_SEARCH.md#rebuilding-the-documents) and is excluded from Git. The four selected base models remain fixed. Selected measurement and LR/head-calibration proposals are implemented in [frw-v3](PROTOCOL_V3.md); the remaining entries are optional proposals. New/Extend statuses describe the reviewed v2 baseline.\n\n"
     out += selected.strip() + "\n\n## Sources cited in these tables\n\n"
     for key in sorted(citation_ids(selected)):
         s = sources[key]
