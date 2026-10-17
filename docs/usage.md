@@ -31,7 +31,7 @@ Authenticate Git with an account or deploy key that can read this private reposi
 ./run.sh prepare --output results
 ```
 
-The largest full-FT baseline has a static memory requirement above 24 GB. Validate it with a pilot on a 32–48 GB GPU; an RTX 4090 is not an all-model full-FT assumption. Actual fit and throughput require the pilot. See [the cloud runbook](docs/CLOUD_RUNBOOK.md) for memory and storage planning.
+The largest full-FT baseline has a static memory requirement above 24 GB. Validate it with a pilot on a 32–48 GB GPU; an RTX 4090 is not an all-model full-FT assumption. Actual fit and throughput require the pilot. See [the cloud runbook](CLOUD_RUNBOOK.md) for memory and storage planning.
 
 ## 2. Plan, check, and run
 
@@ -135,7 +135,7 @@ LR overrides accept spaces or comma-separated rates. Scoped lists use model keys
 
 Keep LR fixed across ranks for a primary comparison. Each rate has its own run identity and summary. Feasible-window analysis requires the **nominal full-FT LR**, so replacing it entirely with a custom list leaves the required baseline missing. Sanity mode uses its own preset rates.
 
-Nominal rates are declared starting values, not proven optima. Epochs, training sample counts, sequence length, task order, alpha, and dropout are fixed protocol controls rather than exposed run options; see [the protocol](docs/PROTOCOL_V2.md).
+Nominal rates are declared starting values, not proven optima. Epochs, training sample counts, sequence length, task order, alpha, and dropout are fixed protocol controls rather than exposed run options; see [the protocol](PROTOCOL_V2.md).
 
 ## 5. Budget and time controls
 
@@ -292,4 +292,4 @@ The launcher defaults `CUDA_VISIBLE_DEVICES` to `0` and `OMP_NUM_THREADS` to `4`
 | Missing baseline/seeds or empty window | Check completeness and finish missing prescribed runs. A complete study can legitimately yield no feasible rank. |
 | CPU analysis missing projection files | Restore the full output tree, including `cache/projections/`, from the GPU machine. |
 
-See [README](README.md), [the cloud runbook](docs/CLOUD_RUNBOOK.md), [the protocol](docs/PROTOCOL_V2.md), and [the validation record](docs/VALIDATION.md). Legacy `notify.py` and `run_notify.sh` utilities are optional and separately configured; the core workflow does not invoke them.
+See [README](../README.md), [the cloud runbook](CLOUD_RUNBOOK.md), [the protocol](PROTOCOL_V2.md), and [the validation record](VALIDATION.md). Legacy `notify.py` and `run_notify.sh` utilities are optional and separately configured; the core workflow does not invoke them.

@@ -60,7 +60,7 @@ Model/tokenizer/data revisions, protocol, source hashes, package freeze and hard
 - [Executable protocol amendment](docs/PROTOCOL_V2.md)
 - [Cloud and budget runbook](docs/CLOUD_RUNBOOK.md)
 - [Validation record and measured CPU spectral timings](docs/VALIDATION.md)
-- [CLI usage](usage.md)
+- [CLI usage](docs/usage.md)
 
 ```bash
 .venv/bin/python -m pip install -r requirements-dev.txt
