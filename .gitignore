@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+setup-freeze.txt
+*.so
+*.egg-info/
+.pytest_cache/
+results/
+.mypy_cache/
+.ruff_cache/
+session-resume.txt
+# Virtual environments
+venv/
+.venv/
+.bootstrap/
+.tools/
+.codex-access-check
+env/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment/secrets
+.env
+.env.*
+!.env.example
+
+# ML artifacts
+checkpoints/
+outputs/
+custom_smoke/
+smoke_results/
+runs/
+wandb/
+mlruns/
+*.ckpt
+*.pth
+*.pt
+*.safetensors
+*.onnx
+
+# Datasets
+data/
+datasets/
+
+# Logs
+*.log
+logs/
+*.docx
+# Keep the two source research documents in the published project.
+proposal/*
+!proposal/fyp-proposal.docx
+!proposal/fyp_methodology.docx
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build
+build/
+dist/
+
