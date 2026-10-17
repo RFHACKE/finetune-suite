@@ -6,7 +6,7 @@ analysis process can consume execution/retrieval.json's verified run IDs.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import os
@@ -14,7 +14,9 @@ from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import time
+from urllib.parse import quote, urlsplit
 
 import modal
 
@@ -41,15 +43,58 @@ def atomic_json(path, value):
     os.replace(temp, path)
 
 
+class ArchiveStream:
+    """Optional user-authorized HTTPS transport; cloud archive SHA stays binding."""
+    def __init__(self, url, access_file):
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or not (parsed.hostname or "").endswith(".modal.run"):
+            raise ValueError("Use the HTTPS URL of the authorized Modal archive endpoint")
+        self.url = url.rstrip("/")
+        self.token = Path(access_file).read_text().strip()
+        self.curl = shutil.which("curl")
+        if not self.curl or len(self.token) < 32:
+            raise ValueError("Archive streaming requires curl and the generated access token file")
+
+    def download(self, remote, entry, destination, expected_sha):
+        if destination.exists() and destination.stat().st_size >= entry.size:
+            if destination.stat().st_size == entry.size and sha256(destination) == expected_sha:
+                return
+            destination.unlink()
+        with tempfile.TemporaryDirectory(prefix="fyp-stream-") as temporary:
+            config = Path(temporary) / "curl.cfg"
+            config.write_text("url = " + json.dumps(self.url + quote(remote, safe="/")) + "\nheader = "
+                              + json.dumps("Authorization: Bearer " + self.token) + "\n")
+            os.chmod(config, 0o600)
+            for attempt in range(3):
+                result = subprocess.run([self.curl, "--fail", "--silent", "--show-error", "--location",
+                                         "--proto", "=https", "--proto-redir", "=https", "--max-redirs", "5",
+                                         "--connect-timeout", "30", "--speed-time", "60", "--speed-limit", "1024",
+                                         "--continue-at", "-", "--config", str(config),
+                                         "--output", str(destination)], capture_output=True)
+                if not result.returncode:
+                    break
+                if result.returncode == 33:
+                    destination.unlink(missing_ok=True)
+                if attempt < 2:
+                    time.sleep(3)
+            if result.returncode:
+                raise OSError(f"Authenticated archive stream failed (curl exit {result.returncode})")
+        if destination.stat().st_size != entry.size or sha256(destination) != expected_sha:
+            destination.unlink(missing_ok=True)
+            raise ValueError("Streamed archive failed the independent cloud size/SHA-256 check")
+
+
 class Collector:
     def __init__(self, target, run, volume, workers, prefer_archives=False,
-                 archive_volume="fyp-finetune-archive"):
+                 archive_volume="fyp-finetune-archive", archive_url="", access_file=".modal-state/stream-token"):
         self.root = Path(target).resolve()
         self.prefix = PurePosixPath("/") / run
         self.volume = modal.Volume.from_name(volume)
         self.pool = ThreadPoolExecutor(max_workers=workers)
         self.prefer_archives = prefer_archives
         self.archive_volume = modal.Volume.from_name(archive_volume) if prefer_archives else None
+        self.stream = ArchiveStream(archive_url, access_file) if archive_url else None
+        self.archive_checksums = {}
         self.state_path = self.root / "execution" / "retrieval.json"
         self.state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {
             "run": run, "volume": volume, "files": {}, "verified_runs": [], "training_finished": False}
@@ -74,22 +119,39 @@ class Collector:
         version = [entry.size, entry.mtime]
         if target.exists() and previous.get("remote_version") == version:
             return key, previous
+        expected_archive = self.archive_checksums.get(str(target))
+        if (expected_archive and target.exists() and target.stat().st_size == entry.size
+                and sha256(target) == expected_archive):
+            return key, {"remote_version": version, "sha256_at_retrieval": expected_archive,
+                         "local_path": str(target.relative_to(self.root)), "bytes": entry.size}
         target.parent.mkdir(parents=True, exist_ok=True)
         temp = target.with_name(target.name + ".download")
         h, size = hashlib.sha256(), 0
-        with temp.open("wb") as out:
-            remote = PurePosixPath("/" + key.lstrip("/"))
-            archive_prefix = self.prefix / "archives"
+        remote = PurePosixPath("/" + key.lstrip("/"))
+        archive_prefix = self.prefix / "archives"
+        if self.stream and remote.is_relative_to(archive_prefix) and key.endswith(".tar.zst"):
+            self.stream.download(str(remote), entry, temp, self.archive_checksums[str(target)])
+            size = temp.stat().st_size
+            checksum = sha256(temp)
+        else:
             source_volume = self.archive_volume if self.prefer_archives and remote.is_relative_to(archive_prefix) else self.volume
-            for chunk in source_volume.read_file(str(remote)):
-                out.write(chunk)
-                h.update(chunk)
-                size += len(chunk)
+            with temp.open("wb") as out:
+                for chunk in source_volume.read_file(str(remote)):
+                    out.write(chunk)
+                    h.update(chunk)
+                    size += len(chunk)
+            checksum = h.hexdigest()
         if size != entry.size:
             temp.unlink(missing_ok=True)
             raise OSError(f"Remote file changed during retrieval: {key}")
+        if target.suffix == ".json":
+            try:
+                json.loads(temp.read_text())
+            except json.JSONDecodeError as exc:
+                temp.unlink(missing_ok=True)
+                raise OSError(f"Remote JSON was updated during retrieval: {key}") from exc
         os.replace(temp, target)
-        return key, {"remote_version": version, "sha256_at_retrieval": h.hexdigest(),
+        return key, {"remote_version": version, "sha256_at_retrieval": checksum,
                      "local_path": str(target.relative_to(self.root)), "bytes": size}
 
     def extract(self, path, manifest):
@@ -118,6 +180,25 @@ class Collector:
             if decoder.poll() is None:
                 decoder.terminate()
                 decoder.wait()
+
+    def verify_candidates(self, candidates, verified):
+        for run_id, result in candidates.items():
+            if run_id in verified:
+                continue
+            run_dir = self.root / "runs" / run_id
+            try:
+                base = self.root / "cache" / "projections" / result["model"] / result["hf_revision"] / "base.pt"
+                base_meta = json.loads(base.with_suffix(".json").read_text())
+                based = self.state.setdefault("verified_base", {})
+                if based.get(result["model"]) != base_meta["sha256"]:
+                    if sha256(base) != base_meta["sha256"]:
+                        raise ValueError("Pretrained projection checksum mismatch")
+                    based[result["model"]] = base_meta["sha256"]
+                if all(sha256(run_dir / b["path"] / "projections.pt") == b["projections_sha256"]
+                       for b in result["boundaries"]):
+                    verified.add(run_id)
+            except FileNotFoundError:
+                pass
 
     def cycle(self):
         jobs, candidates, archives = {}, {}, {}
@@ -177,6 +258,8 @@ class Collector:
                     target = self.root / "logs" / model / str(PurePosixPath(*parts[1:]))
                 elif rel.startswith("worker-"):
                     target = self.root / "execution" / f"main-{model}-{rel}"
+                elif len(parts) == 1 and rel.startswith("failures") and rel.endswith(".jsonl"):
+                    target = self.root / f"failures-{model}-{rel}"
                 else:
                     continue
                 jobs[str(target)] = (entry, target)
@@ -199,42 +282,40 @@ class Collector:
                     archive_entry = indexed.get(manifest["archive"])
                     if archive_entry:
                         target = self.root / "execution" / "incoming" / manifest["archive"]
+                        self.archive_checksums[str(target)] = manifest["archive_sha256"]
                         jobs[str(target)] = (archive_entry, target)
                         archives[manifest["run_id"]] = (target, manifest)
         failures = []
+        archives_by_path = {str(path.relative_to(self.root)): (run_id, path, manifest)
+                            for run_id, (path, manifest) in archives.items()}
         futures = [self.pool.submit(self.fetch, job) for job in jobs.values()]
-        for future in futures:
+        for future in as_completed(futures):
             try:
                 key, record = future.result()
                 self.state["files"][key] = record
+                ready_archive = archives_by_path.get(record["local_path"])
+                if ready_archive:
+                    run_id, path, manifest = ready_archive
+                    self.extract(path, manifest)
+                    self.state["extracted_archives"][run_id] = manifest["archive_sha256"]
+                    path.unlink()
+                    before = len(verified)
+                    self.verify_candidates(candidates, verified)
+                    # Publish each complete archive immediately. A slower
+                    # unrelated download must not hold up local CPU analysis.
+                    self.state["verified_runs"] = sorted(verified)
+                    atomic_json(self.state_path, self.state)
+                    if len(verified) != before:
+                        print(json.dumps({"archive_ready": run_id,
+                                          "verified_completed_runs": len(verified)}), flush=True)
             except Exception as exc:
                 failures.append(repr(exc))
-        for run_id, (path, manifest) in archives.items():
-            try:
-                self.extract(path, manifest)
-                self.state["extracted_archives"][run_id] = manifest["archive_sha256"]
-                path.unlink()
-            except Exception as exc:
-                failures.append(repr(exc))
-        for run_id, result in candidates.items():
-            if run_id in verified:
-                continue
-            run_dir = self.root / "runs" / run_id
-            try:
-                base = self.root / "cache" / "projections" / result["model"] / result["hf_revision"] / "base.pt"
-                base_meta = json.loads(base.with_suffix(".json").read_text())
-                based = self.state.setdefault("verified_base", {})
-                if based.get(result["model"]) != base_meta["sha256"]:
-                    if sha256(base) != base_meta["sha256"]:
-                        raise ValueError("Pretrained projection checksum mismatch")
-                    based[result["model"]] = base_meta["sha256"]
-                if all(sha256(run_dir / b["path"] / "projections.pt") == b["projections_sha256"]
-                       for b in result["boundaries"]):
-                    verified.add(run_id)
-            except FileNotFoundError:
-                pass
+        self.verify_candidates(candidates, verified)
         monitor = self.root / "execution" / "main-workers.json"
-        journal = json.loads(monitor.read_text()) if monitor.exists() else {}
+        try:
+            journal = json.loads(monitor.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            journal = {}
         self.state.update({"verified_runs": sorted(verified), "last_cycle_unix": time.time(),
                            "training_finished": len(journal.get("returned", {})) == len(MODELS),
                            "last_cycle_errors": failures})
@@ -256,11 +337,15 @@ def main():
     parser.add_argument("--interval", type=int, default=60)
     parser.add_argument("--prefer-archives", action="store_true", help="Use lossless CPU-packaged run archives")
     parser.add_argument("--archive-volume", default="fyp-finetune-archive")
+    parser.add_argument("--archive-url", default="", help="Explicitly authorized authenticated Modal archive endpoint")
+    parser.add_argument("--access-file", default=".modal-state/stream-token", help="Local archive endpoint token file")
     args = parser.parse_args()
     if args.workers < 1 or args.interval < 5:
         parser.error("workers must be positive and interval at least five seconds")
+    if args.archive_url and not args.prefer_archives:
+        parser.error("--archive-url requires --prefer-archives")
     collector = Collector(args.target, args.run, args.volume, args.workers, args.prefer_archives,
-                          args.archive_volume)
+                          args.archive_volume, args.archive_url, args.access_file)
     while True:
         status = collector.cycle()
         if not args.watch or (status["training_finished"] and not status["errors"]

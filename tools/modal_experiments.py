@@ -66,7 +66,9 @@ image = (modal.Image.debian_slim(python_version="3.11")
 def save(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
+    os.replace(temporary, path)
 
 
 def copy_delta(source, destination):

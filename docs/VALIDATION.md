@@ -1,6 +1,16 @@
 # Validation record
 
-Development review: 17 October 2026. This records software and numerical checks, not FYP experimental findings.
+## Modal preservation update — 18 October 2026
+
+Real LoRA-only LR/head calibration has now completed all 48 planned cases for the four pinned models. The expanded 140-sequence main cohort is running on four L40S workers; it is not yet a completed scientific result. The scientific package remains frozen at SHA-256 `ff3d682687b8ca5db927a383539cf816691c06a647c96c7b2750048f14d3fb16`. Production full-FT calibration/baselines are outside this requested cloud cohort.
+
+The private CPU-only preservation observer has been deployed and started from a client that exits immediately. Its first durable remote inventory, failure records, retry candidates and source manifest have been retrieved successfully. All four pretrained projection caches were checked for remote presence. The preservation checks also passed against 15 actual completed local run exports. The cloud training coordinator and archive packager continued after their local CLI clients were disconnected. Local collection, spectral analysis and finalization are paused until the user returns; the temporary download endpoint is stopped.
+
+The new preservation tests exercise all 140 distinct identities, pending versus failed work, partial task checkpoint reporting, budget-deferred runs, retained tracebacks, archive availability and missing export detection. These tests and the existing protocol/parallel tests passed **20 cases**; Ruff and whitespace checks passed. The earlier authenticated streaming checks verified access rejection, ranged resumption and a complete real archive checksum. These transport and preservation checks do not replace the final requested-cohort numerical/spectral audit. See [OVERNIGHT.md](OVERNIGHT.md) for durable locations and recovery commands.
+
+## Development review — 17 October 2026
+
+The following historical review records software and numerical checks at the development stage, before the Modal execution.
 
 The v3 full CPU regression run and final targeted checks cover **58 passing CPU cases**; **six CUDA integration cases were skipped** in the validated CPU environment. The full pass completed with 56 passing tests; subsequent targeted runs covered the two added guards and revalidated the changed calibration/measurement paths. The parallel launcher also completed a real two-worker planning dry run during the original suite validation.
 
@@ -14,7 +24,7 @@ The v3 full CPU regression run and final targeted checks cover **58 passing CPU 
 - Checked all-task gates against hidden cancellation, underlearned references, fixed tolerances and calibrated baseline anchors. Verified explicit disjoint calibration split indices.
 - Checked all **30 CLI flag spellings** against command-specific documentation, parsed 36 runnable usage examples, and confirmed invalid calibration combinations fail before GPU work. Ruff, shell syntax, Word structure/citations and whitespace checks passed.
 
-Production calibration has not been performed. The development GPU has insufficient VRAM for the full fixed-model/full-FT scope, and the validated Python environment uses CPU PyTorch. No winning production LRs, GPU throughput, scientific accuracy or rental costs are claimed.
+At that development-review point, production calibration had not been performed. The development GPU had insufficient VRAM for the full fixed-model/full-FT scope, and the validated Python environment used CPU PyTorch. That review made no claims about winning production LRs, GPU throughput, scientific accuracy or rental costs.
 
 ## Environment and checks
 
@@ -24,7 +34,7 @@ The tests cover full grid accounting, pilot reuse, stable seed-block shards, imm
 
 Real tiny Llama, Qwen2 and Granite architectures each execute all three task boundaries with both LoRA and non-embedding full FT on CPU. Synthetic test accuracies and figures remain in temporary test directories and are not bundled as study results. GPU versions of the six architecture/track integration cases are included and skip when CUDA is unavailable.
 
-The local CUDA package installation was attempted but not completed because large wheel downloads were too slow on the development connection. **CUDA kernels and production-size 4090/5090 memory/throughput remain unverified here.** The installer runs a real bf16/optimizer check, and the full-size pilot is the required acceptance test on the rented instance. No cloud rental was created.
+The local CUDA package installation was attempted but not completed because large wheel downloads were too slow on the development connection. **CUDA kernels and production-size 4090/5090 memory/throughput remained unverified in this development environment.** The installer runs a real bf16/optimizer check, and the full-size pilot is the required acceptance test on a rented instance. No cloud rental was created during that development validation.
 
 ## Real data-pipeline checks
 

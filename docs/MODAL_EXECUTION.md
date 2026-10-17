@@ -28,7 +28,9 @@ modal run --detach tools/modal_experiments.py --stage consolidate
 
 Merged defaults retain the original activated calibration reports for all four models. All main workers load that same policy before freezing their protocol. Consolidation verifies common experimental controls and writes a separate `requested-completeness.json` for the 140-sequence requested scope; the original suite audit still reports the absent full-FT design honestly. Retrieve the run volume into `Finetune-result`, retaining raw predictions, step logs, adapters, heads, projection factors, calibration JSON and charts. CPU spectral analysis and aggregate figures can then use the saved tensors without renting a GPU.
 
-Start the CPU packager before the main sweep, then collect and analyze while training continues:
+For the current unattended execution, follow [OVERNIGHT.md](OVERNIGHT.md): durable training and packaging continue remotely; local collection, CPU spectral work and final analysis are deferred until the user returns. A private CPU observer preserves an exact run inventory, failure tracebacks, retry candidates and the frozen source remotely. No training retries are automatic.
+
+The CPU packager can run during the sweep. Collection and spectral analysis below are manual steps for when the user returns:
 
 ```bash
 modal run --detach tools/modal_archive.py
@@ -51,6 +53,22 @@ Collector options:
 | `--interval` | `60` | Seconds between collection cycles; minimum five. |
 | `--prefer-archives` | Off | Retrieve CPU-packaged lossless archives instead of individual main-run files; requires the local `zstd` executable. |
 | `--archive-volume` | `fyp-finetune-archive` | Volume containing the packaged archives. |
+| `--archive-url` | Empty | Optional explicitly authorized HTTPS Modal endpoint for streaming archives; requires `--prefer-archives` and curl. Omit it to use normal authenticated SDK downloads. |
+| `--access-file` | `.modal-state/stream-token` | Local credential file for that optional endpoint; its value is never printed or passed in process arguments. |
+
+Each completed archive is extracted and published for local analysis immediately, even while another download is still pending. Every archive must match the cloud packager's size and SHA-256 before extraction.
+
+For this execution, the user explicitly approved a temporary, externally reachable, token-protected Modal streaming endpoint after ordinary downloads stalled. Deploy [modal_stream.py](../tools/modal_stream.py) only with comparable authorization. It mounts only the archive volume, serves only this run's `archives/` files, checks a random bearer token before reading any file, and supports HTTP range requests for resumption. It has no GPU, no Hugging Face credential, and no directory listing. The token is generated in ignored `.modal-state/stream-token`, supplied as an ephemeral Modal secret, and placed in private temporary curl configuration files during downloads. Authentication rejection and a full cloud archive checksum are tested before use.
+
+```bash
+modal deploy tools/modal_stream.py
+FYP_ARCHIVE_URL=$(python3 -c 'import modal; print(modal.Function.from_name("fyp-archive-stream", "stream_archives").get_web_url())')
+python3 tools/collect_modal_results.py --watch --prefer-archives --archive-url "$FYP_ARCHIVE_URL"
+# Stop the temporary endpoint after successful collection:
+modal app stop --yes fyp-archive-stream
+```
+
+The optional stream changes transport only. It retains the independent cloud archive SHA-256 and all projection checks. Cumulative CPU transfer charges remain part of the approved total. Normal SDK collection remains available without deploying an endpoint.
 
 The local analysis helper accepts `--root` (default `Finetune-result`), required `--model` (one fixed registry key), `--threads` (default 2), `--watch` (off by default), and `--interval` (default 60 seconds, minimum effective five). It processes only verified runs that still lack completed spectral diagnostics. Its temporary directory contains symlinks to the actual saved exports; the suite's unchanged analysis code writes results into the real run directories. Run one helper per model to overlap CPU analysis with GPU work. Neither collection nor local analysis starts cloud compute. The CPU packager has no CLI options; `FYP_MODAL_RUN` selects its run directory.
 

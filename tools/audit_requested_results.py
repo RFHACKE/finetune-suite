@@ -120,7 +120,10 @@ def main():
     root = Path(args.root)
     report = audit(root)
     (root / "requested-completeness.json").write_text(json.dumps(report, indent=2) + "\n")
-    print(json.dumps(report, indent=2))
+    print(json.dumps({k: v for k, v in report.items() if k not in
+                      ("missing", "selected_policies", "gradient_spike_flagged_runs")}, indent=2))
+    print(f"Missing sequences: {len(report['missing'])}; gradient-spike flagged runs: "
+          f"{len(report['gradient_spike_flagged_runs'])}. Full evidence: {root / 'requested-completeness.json'}")
 
 
 if __name__ == "__main__":

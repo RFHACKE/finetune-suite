@@ -121,7 +121,12 @@ def archive_completed_runs():
                     failures.append({"run_id": run_dir.name, "error": repr(exc)})
                     pending.append(run_dir.name)
         monitor = base / "execution" / "main-workers.json"
-        state = json.loads(monitor.read_text()) if monitor.exists() else {}
+        try:
+            state = json.loads(monitor.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            # The controller updates this live journal in place. An external
+            # volume reader can briefly observe an incomplete update.
+            state = {}
         report = {"packaged_runs": len(packaged), "pending": pending, "errors": failures[-20:],
                   "updated_unix": time.time(),
                   "zstd_version": subprocess.check_output(["zstd", "--version"], text=True).strip()}

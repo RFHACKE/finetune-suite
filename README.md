@@ -66,7 +66,8 @@ Model/tokenizer/data revisions, protocol, source hashes, package freeze and hard
 - [Executable protocol amendment](docs/PROTOCOL_V2.md)
 - [Current v3 protocol and LR selection](docs/PROTOCOL_V3.md)
 - [Cloud and budget runbook](docs/CLOUD_RUNBOOK.md)
-- [Modal execution, lossless retrieval and overlapping CPU analysis](docs/MODAL_EXECUTION.md)
+- [Modal execution and lossless retrieval](docs/MODAL_EXECUTION.md)
+- [Unattended run, remote failure reports and morning recovery](docs/OVERNIGHT.md)
 - [Validation record and measured CPU spectral timings](docs/VALIDATION.md)
 - [CLI usage](docs/usage.md)
 
