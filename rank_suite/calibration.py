@@ -1,7 +1,7 @@
 """Training-only, resumable LR/head-rate selection with frozen cohort defaults.
 
 Screen on RTE, confirm two distinct rates over the full sequence/two seeds,
-then diagnose the chosen LoRA policy at rank 4 and 64 on RTE. No official
+then diagnose the chosen LoRA policy at the requested endpoint ranks on RTE. No official
 validation score participates in selection. Calibration never starts main runs.
 """
 from __future__ import annotations
@@ -56,15 +56,16 @@ def make_plan(spec, seeds=(42, 123)):
                            'head_multipliers': heads, 'rank': 16 if track == 'lora' else None})
     screening = sum(len(g['rates']) * len(heads) for g in groups)
     confirmation = len(groups) * 2 * len(seeds)
-    endpoints = 2 * sum(g['track'] == 'lora' for g in groups)
+    endpoint_ranks = sorted({min(spec.ranks), max(spec.ranks)})
+    endpoints = len(endpoint_ranks) * sum(g['track'] == 'lora' for g in groups)
     steps_per_task = math.ceil(int(.8 * spec.train_samples) / config.TRAIN_BATCH) * spec.epochs
     plan = {'version': CALIBRATION_VERSION, 'context': calibration_context(spec),
             'groups': groups, 'seeds': list(seeds), 'screen_task': 'rte',
             'confirmation_tasks': list(config.TASK_KEYS), 'finalists_per_track': 2,
-            'endpoint_ranks': [4, 64], 'endpoint_task': 'rte', 'sources': SOURCES,
+            'endpoint_ranks': endpoint_ranks, 'endpoint_task': 'rte', 'sources': SOURCES,
             'selection': {'screen': 'RTE accuracy, then NLL; best head per rate; top two distinct rates',
                 'confirmation': 'highest mean final-row accuracy across tasks/seeds among candidates whose mean diagonal beats each holdout majority baseline; ties: mean diagonal, NLL, lower LR, lower head multiplier',
-                'endpoint': 'RTE checks at r=4,64; underlearning is reported; numerical instability blocks activation',
+                'endpoint': f'RTE checks at ranks {endpoint_ranks}; underlearning is reported; numerical instability blocks activation',
                 'uncertainty': 'sample SD and every paired seed score; two seeds do not prove a universal optimum'},
             'workload': {'screening_runs': screening, 'confirmation_runs': confirmation,
                 'endpoint_runs': endpoints, 'maximum_runs': screening + confirmation + endpoints,

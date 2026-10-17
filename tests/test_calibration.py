@@ -29,6 +29,11 @@ def test_calibration_plan_is_bounded_and_separate_from_main():
     assert plan['workload']['maximum_optimizer_steps'] == 57000
     assert plan['seeds'] == [42, 123]
     assert plan['confirmation_tasks'] == ['rte', 'mnli', 'sst2']
+    assert plan['endpoint_ranks'] == [4, 64]
+    expanded = calibration.make_plan(replace(spec, track='lora', ranks=[4, 8, 16, 32, 64, 128, 256]))
+    assert expanded['endpoint_ranks'] == [4, 256]
+    assert expanded['workload']['maximum_runs'] == 48
+    assert expanded['workload']['maximum_optimizer_steps'] == 30000
     assert len(build_grid(spec)) == 120
     for change in (replace(spec, num_shards=2), replace(spec, mode='smoke')):
         with pytest.raises(ValueError):

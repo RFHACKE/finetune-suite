@@ -27,6 +27,9 @@ ENV/
 # Environment/secrets
 .env
 .env.*
+hf.env
+Finetune-result/
+.modal-state/
 !.env.example
 
 # ML artifacts
