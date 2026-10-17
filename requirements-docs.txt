@@ -1,0 +1,2 @@
+# Optional: rebuild literature-review.docx; not needed for experiments.
+python-docx==1.2.0
