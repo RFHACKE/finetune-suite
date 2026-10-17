@@ -1,7 +1,7 @@
 """Explicit, staged Modal execution; no cloud calls occur on import.
 
 Usage: modal run --detach tools/modal_experiments.py --stage prefetch
-Stages: prefetch, benchmark, calibrate, merge-defaults, train, consolidate.
+Stages: prefetch, benchmark, calibration, merge-defaults, main, consolidate.
 GPU stages require a positive --seconds allowance per worker. Each worker has
 its own result directory; Linux advisory locks and active training use local
 disk, with incremental durable copies after task checkpoints and every run.
@@ -10,6 +10,7 @@ is injected as an ephemeral Modal secret, never copied as a file.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,9 @@ CACHE_NAME = "fyp-pinned-model-cache"
 RESULTS_NAME = "fyp-finetune-results"
 RANKS = [4, 8, 16, 32, 64, 128, 256]
 MODELS = ["llama3.2-1b", "qwen2.5-1.5b", "granite3.3-2b", "qwen2.5-3b"]
+# Account rates checked 2026-10-18: GPU + hard-capped 2 cores / 16 GiB.
+# An 8 GiB request avoids paying for unused host RAM; the GPU holds activations.
+WORKER_RATE = {"H100": 4.1726, "L40S": 2.1726}
 app = modal.App("fyp-finetune-suite", include_source=False)
 cache = modal.Volume.from_name(CACHE_NAME, create_if_missing=True, version=2)
 outputs = modal.Volume.from_name(RESULTS_NAME, create_if_missing=True, version=2)
@@ -48,7 +52,7 @@ requirements = [line.strip() for line in (ROOT / "requirements.txt").read_text()
 image = (modal.Image.debian_slim(python_version="3.11")
          .uv_pip_install("torch==2.8.0", index_url="https://download.pytorch.org/whl/cu128")
          .uv_pip_install(*requirements)
-         .env({"PYTHONPATH": "/app:/app/tools", "HF_HOME": "/cache/huggingface",
+         .env({"PYTHONPATH": "/app:/app/tools", "HF_HOME": "/cache/huggingface", "FYP_MODAL_RUN": RUN,
                "TOKENIZERS_PARALLELISM": "false", "OMP_NUM_THREADS": "4",
                "MKL_NUM_THREADS": "4", "OPENBLAS_NUM_THREADS": "4",
                "MPLBACKEND": "Agg", "PYTHONUNBUFFERED": "1",
@@ -140,16 +144,17 @@ def durable_training(local, remote):
 
 
 @app.function(image=image, secrets=[hf_secret()], volumes={"/cache": cache, "/results": outputs},
-              gpu="H100", cpu=(2, 2), memory=(16384, 24576), timeout=900,
+              gpu="H100", cpu=(2, 2), memory=(8192, 16384), timeout=900,
               max_containers=4, single_use_containers=True, retries=0)
 def gpu_work(stage, model="qwen2.5-3b", seconds=600, gpu="H100"):
     import torch
-    from rank_suite import config
+    from rank_suite import config, utils
     begin = time.time()
+    utils.get_logger("rank_suite")
     torch.set_num_threads(4)
     remote_base = Path("/results") / RUN
     local = Path("/work") / stage / model
-    remote = remote_base / stage / model
+    remote = remote_base / stage / (f"{model}-{gpu}" if stage == "benchmark" else model)
     if remote.exists():
         copy_delta(remote, local)
     local.mkdir(parents=True, exist_ok=True)
@@ -182,14 +187,14 @@ def gpu_work(stage, model="qwen2.5-3b", seconds=600, gpu="H100"):
         elif stage == "calibration":
             from rank_suite.calibration import run_calibration
             spec = spec_for(local, model, max_hours=max(60, seconds - 90) / 3600,
-                            hourly_rate=4.35, calibrated_defaults={})
+                            hourly_rate=WORKER_RATE[gpu], calibrated_defaults={})
             report = run_calibration(spec)
         elif stage == "main":
             from rank_suite.runner import run_all
             defaults = remote_base / "defaults"
             copy_delta(defaults, local)
             spec = spec_for(local, model, max_hours=max(60, seconds - 90) / 3600,
-                            hourly_rate=4.35)
+                            hourly_rate=WORKER_RATE[gpu])
             report = run_all(spec)
         else:
             raise ValueError(f"Unknown GPU stage: {stage}")
@@ -250,7 +255,7 @@ def combine(stage):
             if protocol is not None and controls != protocol:
                 raise ValueError("Cannot pool different experimental controls")
             protocol = controls
-            for name in ("runs", "base", "hardware", "data", "invocations", "batches"):
+            for name in ("runs", "cache", "hardware", "data", "invocations", "batches"):
                 if (source / name).exists():
                     copy_delta(source / name, root / name)
             for name in ("protocol.json", "software.json"):
@@ -280,30 +285,73 @@ def combine(stage):
 
 @app.function(image=image, volumes={"/results": outputs}, cpu=(0.125, 0.125),
               memory=(256, 1024), timeout=28800, single_use_containers=True, retries=0)
-def coordinate(stage, models, seconds, gpu):
+def coordinate(stage, models, seconds, gpu, stage_budget):
     """A durable CPU parent keeps every parallel child alive if the client exits."""
-    calls = {model: gpu_work.with_options(gpu=gpu, timeout=seconds).spawn(
-        stage, model=model, seconds=seconds, gpu=gpu) for model in models}
+    calls, starts = {}, {}
+    for model in models:
+        starts[model] = time.monotonic()
+        calls[model] = gpu_work.with_options(gpu=gpu, timeout=seconds).spawn(
+            stage, model=model, seconds=seconds, gpu=gpu)
+    return watch_calls(stage, calls, starts, seconds, gpu, stage_budget)
+
+
+def watch_calls(stage, calls, starts, seconds, gpu, stage_budget):
     journal = {"stage": stage, "seconds_per_worker": seconds, "gpu": gpu,
-               "created_unix": time.time(),
+               "created_unix": time.time() - (time.monotonic() - min(starts.values())),
+               "stage_budget_usd": stage_budget,
                "calls": {model: call.object_id for model, call in calls.items()}}
     path = Path("/results") / RUN / "execution" / f"{stage}-workers.json"
     save(path, journal)
     outputs.commit()
-    results = {}
-    for model, call in calls.items():
-        try:
-            results[model] = call.get()
-        except Exception as exc:
-            results[model] = {"status": "worker_failed", "error": repr(exc)}
+    results, finishes = {}, {}
+    while len(results) < len(calls):
+        for model, call in calls.items():
+            if model in results:
+                continue
+            try:
+                results[model] = call.get(timeout=0)
+                finishes[model] = time.monotonic()
+            except (TimeoutError, modal.exception.TimeoutError):
+                pass
+            except Exception as exc:
+                results[model] = {"status": "worker_failed", "error": repr(exc)}
+                finishes[model] = time.monotonic()
+        now = time.monotonic()
+        charged_seconds = sum(finishes.get(model, now) - starts[model] for model in calls)
+        # Includes queuing/startup time, so it conservatively exceeds allocated
+        # GPU time. Allow teardown and the tiny CPU parent's bill within margin.
+        ceiling = charged_seconds * WORKER_RATE[gpu] / 3600 + .05
+        journal["conservative_resource_cost_usd"] = ceiling
+        if ceiling + .08 >= stage_budget and len(results) < len(calls):
+            journal["stop_reason"] = "aggregate_stage_budget"
+            for model, call in calls.items():
+                if model not in results:
+                    call.cancel(terminate_containers=True)
+                    results[model] = {"status": "budget_deferred", "checkpoints_preserved": True}
         journal["returned"] = results
         save(path, journal)
         outputs.commit()
+        if len(results) < len(calls):
+            time.sleep(5)
     return results
 
 
+@app.function(image=image, volumes={"/results": outputs}, cpu=(0.125, 0.125),
+              memory=(256, 1024), timeout=28800, single_use_containers=True, retries=0)
+def monitor_existing(stage, stage_budget):
+    path = Path("/results") / RUN / "execution" / f"{stage}-workers.json"
+    previous = json.loads(path.read_text())
+    calls = {model: modal.FunctionCall.from_id(call_id) for model, call_id in previous["calls"].items()}
+    for call in calls.values():
+        call.hydrate()
+    start = time.monotonic() - max(0, time.time() - previous["created_unix"]) - 2
+    return watch_calls(stage, calls, {model: start for model in calls},
+                       previous["seconds_per_worker"], previous["gpu"], stage_budget)
+
+
 @app.local_entrypoint()
-def main(stage: str = "prefetch", models: str = "", seconds: int = 600, gpu: str = "H100"):
+def main(stage: str = "prefetch", models: str = "", seconds: int = 600, gpu: str = "H100",
+         stage_budget: float = 0.0):
     state = ROOT / "Finetune-result" / "execution"
     state.mkdir(parents=True, exist_ok=True)
     selected_models = models.split(",") if models else MODELS
@@ -312,18 +360,35 @@ def main(stage: str = "prefetch", models: str = "", seconds: int = 600, gpu: str
     if stage == "prefetch":
         calls = [("prefetch", prefetch.spawn())]
     elif stage in ("benchmark", "calibration", "main"):
+        if gpu not in WORKER_RATE:
+            raise ValueError("Budgeted GPU types are H100 and L40S; measure/update rates before adding another")
         if seconds < 120:
             raise ValueError("An explicit per-worker time allowance of at least 120 seconds is required")
         if stage == "benchmark" and not models:
             selected_models = ["qwen2.5-3b"]
-        calls = [("coordinator", coordinate.spawn(stage, selected_models, seconds, gpu))]
+        if stage_budget <= 0:
+            if stage != "benchmark":
+                raise ValueError("GPU production stages require an explicit --stage-budget in USD")
+            stage_budget = seconds * len(selected_models) * WORKER_RATE[gpu] / 3600 + .2
+        if stage_budget > 28:
+            raise ValueError("Stage allowance is capped at $28; review cumulative total spending separately")
+        calls = [("coordinator", coordinate.spawn(stage, selected_models, seconds, gpu, stage_budget))]
+    elif stage == "monitor-calibration":
+        if not 0 < stage_budget <= 28:
+            raise ValueError("Supply the original positive aggregate --stage-budget")
+        calls = [("monitor", monitor_existing.spawn("calibration", stage_budget))]
     elif stage in ("merge-defaults", "consolidate"):
         calls = [(stage, combine.spawn(stage))]
     else:
         raise ValueError(stage)
     journal = {"run": RUN, "stage": stage, "app_id": app.app_id, "gpu": gpu,
-               "seconds_per_worker": seconds, "created_unix": time.time(),
+               "seconds_per_worker": seconds, "stage_budget_usd": stage_budget, "created_unix": time.time(),
                "calls": {model: call.object_id for model, call in calls}, "results_volume": RESULTS_NAME}
+    runner_hash = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    journal["cloud_runner_sha256"] = runner_hash
+    snapshot = state / "runner-snapshots" / f"{stage}-{runner_hash[:12]}.py"
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(__file__, snapshot)
     save(state / f"{stage}-calls.json", journal)
     print(json.dumps(journal, indent=2), flush=True)
     results = {model: call.get() for model, call in calls}

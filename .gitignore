@@ -27,6 +27,8 @@ ENV/
 # Environment/secrets
 .env
 .env.*
+*.env
+*.env:Zone.Identifier
 hf.env
 Finetune-result/
 .modal-state/
