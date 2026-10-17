@@ -2,6 +2,8 @@
 
 `run.sh` launches the Feasible Rank Window suite. It changes to the repository directory, activates `.venv` when present, and forwards arguments to `rank_suite.cli`. With no arguments it prints help. Training starts when you select `run`.
 
+For every accepted flag, including defaults and command-specific differences, see the [complete CLI option reference](#11-complete-cli-option-reference). The earlier sections provide the end-to-end workflow.
+
 ```bash
 ./run.sh --help
 ./run.sh run --help
@@ -293,3 +295,134 @@ The launcher defaults `CUDA_VISIBLE_DEVICES` to `0` and `OMP_NUM_THREADS` to `4`
 | CPU analysis missing projection files | Restore the full output tree, including `cache/projections/`, from the GPU machine. |
 
 See [README](../README.md), [the cloud runbook](CLOUD_RUNBOOK.md), [the protocol](PROTOCOL_V2.md), and [the validation record](VALIDATION.md). Legacy `notify.py` and `run_notify.sh` utilities are optional and separately configured; the core workflow does not invoke them.
+
+## 11. Complete CLI option reference
+
+Syntax: `./run.sh COMMAND [OPTIONS]`. Put command options **after** the command, for example `./run.sh run --mode pilot`. Boolean switches take no value: use `--deterministic`, not `--deterministic true`. An omitted switch is off. `VALUE ...` means one or more values; do not type the ellipsis.
+
+This reference covers the current parser in `rank_suite/cli.py`. Options are command-specific: in particular, `doctor --optimizer` has different choices from `run --optimizer`, and `analyze --mode` has different choices from `run --mode`.
+
+### Help: global and every command
+
+<!-- cli-options: global run plan prepare intruders analyze doctor list-models -->
+
+| Flag | Value/default | Effect and example |
+|---|---|---|
+| `-h`, `--help` | No value; help is not printed unless requested or no command is supplied. | Print help and exit successfully. `./run.sh --help` lists commands; `./run.sh intruders --help` lists that command's options. Both spellings work globally and after every command. |
+
+### `run` and `plan`: all shared options
+
+<!-- cli-options: run plan -->
+
+Every option in this table is accepted by both commands. `plan` validates configuration and prints the selected workload; it does not train, export weights, enforce an admission limit, or replace results. Thus execution switches such as `--force` and `--keep-going` describe the intended run policy when supplied to `plan`.
+
+| Option and value | Effective default | Meaning, accepted values, and constraints |
+|---|---|---|
+| `--models MODEL ...` | All four fixed models. | Registry keys or exact checkpoint IDs from Section 3, separated by spaces. Duplicates are removed. Other checkpoints are rejected. Example: `--models llama3.2-1b qwen2.5-3b`. |
+| `--output PATH` | `results` | Experiment directory. Relative paths resolve from the repository directory because the launcher changes there. Absolute paths are accepted, for example `--output /workspace/fyp-results`. Main/pilot use it directly; smoke/sanity append their own subdirectory. |
+| `--track TRACK` | `both` | Choose `lora`, `full`, or `both`. `full` means all non-embedding backbone weights plus the current task head; token embeddings stay frozen. Ranks apply to LoRA only. |
+| `--mode MODE` | `main` | Choose `main`, `pilot`, `sanity`, or `smoke`. Pilot/smoke force rank 16 and seed 42. Sanity additionally forces its preset LR comparisons and RTE training holdout. See Section 2 for data, epoch, and output differences. |
+| `--ranks RANK ...` | `4 8 16 32 64` | Positive integers, separated by spaces or commas; duplicates are removed. A rank cannot exceed the smallest `v_proj` output width among selected models: 256 when either Qwen is selected, 512 for a Llama/Granite-only selection. Other valid ranks are sensitivity experiments; the main window requires the prescribed grid. Pilot/smoke/sanity use rank 16 instead. |
+| `--seeds SEED ...` | `42 123 456 789 1024` | Integers from `0` through `4294967295`, separated by spaces or commas; main-grid duplicates are removed. Pilot/smoke/sanity use seed 42 instead. The main window requires the five prescribed seeds. |
+| `--lora-lrs RATE ...` | Nominal per-model LoRA rates in Section 3. | Finite positive rates, using decimal or scientific notation. Supply a common list (`--lora-lrs 1e-4 2e-4`) or scoped lists (`--lora-lrs qwen2.5-1.5b=1e-4,1.85e-4`). Scoped names must be selected registry keys, even if `--models` uses exact checkpoint IDs. Sanity uses its preset comparisons instead. |
+| `--full-lrs RATE ...` | Nominal per-model full-FT rates in Section 3. | Same syntax and positivity rules as `--lora-lrs`, for the full track. A model's nominal rate must be present to provide the required window baseline. Example: `--full-lrs qwen2.5-1.5b=1e-5,1.85e-5`. Sanity uses nominal and twice-nominal rates instead. |
+| `--optimizer POLICY` | `standard` | `standard`: fp32 AdamW moments for LoRA, 8-bit dense-matrix moments with fp32 head/vector overrides for full FT. `adamw`: fp32 moments in both tracks. A changed policy requires a separate output cohort. This option does not quantize model weights. |
+| `--micro-batch N` | `4` | Positive integer divisor of 16: `1`, `2`, `4`, `8`, or `16`. Used for all tracks/ranks in the cohort. A changed partition requires a new output directory. |
+| `--accum N` | `16 / micro_batch`; normally `4`. | Positive integer accumulation count. If specified, `micro_batch × accum` must equal 16. Examples: `--micro-batch 8 --accum 2`, or `--micro-batch 2 --accum 8`. |
+| `--eval-batch N` | `32` | Positive integer evaluation batch size. Does not reduce the validation set; smoke retains its separate diagnostic evaluation cap. Changing it requires a new cohort. |
+| `--deterministic` | Off. | Enable strict deterministic PyTorch algorithms. May reduce speed or fail if an operation lacks a deterministic implementation. Use the same setting across a cohort; this does not promise identical results across hardware/software versions. |
+| `--save-full-weights` | Off. | Save each full-FT backbone at every task boundary in addition to always-saved q/v projections and heads. LoRA already saves adapters. Adds substantial disk/I/O use; enabling it later does not retroactively export completed runs. |
+| `--force` | Off; completed runs are skipped. | Rerun selected completed configurations and discard their completion/resume markers before restarting. Does not bypass protocol/software compatibility checks and does not mean deleting the entire output directory. Example: `./run.sh run --models qwen2.5-1.5b --ranks 16 --seeds 42 --force`. |
+| `--keep-going` | Off; stop after a run fails. | Continue to subsequent selected runs after a failure. Failures are recorded in `failures-worker-<index>.jsonl`; the batch still exits nonzero if any run failed. It does not automatically repair or retry failed runs. |
+| `--num-shards N` | `1` | Positive integer count of independent GPU workers. Partitioning keeps each model/seed block's ranks and baseline together. This is independent-run scheduling, not distributed training of one model. Start all intended shards to finish the selected grid. |
+| `--shard-index I` | `0` | Zero-based worker index; require `0 <= I < num_shards`. Example: `--num-shards 2 --shard-index 1`. Changing shard assignment does not change the scientific controls. |
+| `--hourly-rate USD` | Unset; no USD estimate. | Finite positive USD/hour rate. Use the actual total instance quote, including its GPUs. Worker summaries multiply this by that worker's elapsed time; sums across overlapping workers are not an instance bill. Example: `--hourly-rate 0.40` uses an illustrative rate. |
+| `--budget USD` | Unset; no budget admission limit. | Finite positive per-invocation allowance. Requires `--hourly-rate` and `budget > reserve`. The training-time allowance is `(budget - reserve) / hourly_rate` hours. It is not a lifetime account cap or an instruction to terminate the rental. |
+| `--reserve USD` | `0` | Finite nonnegative amount excluded from the budget's training-time allowance. Without `--budget`, it does not create a limit. Example: `--budget 25 --reserve 5` leaves a $20 admission allowance for this invocation. |
+| `--max-hours HOURS` | Unset; no elapsed-time admission limit. | Finite positive hours. Finish the current run before stopping admission; measured next-run estimates may defer work earlier. When combined with a budget, the smaller time allowance applies. Example: `--max-hours 2.5`. |
+
+For LR lists, a scoped list takes precedence for that model; a common list applies to models without a scoped list. For example:
+
+```bash
+./run.sh plan --models llama3.2-1b qwen2.5-1.5b --track lora \
+  --lora-lrs 1e-4 2e-4 qwen2.5-1.5b=9.25e-5,1.85e-4
+```
+
+Here Llama receives `1e-4` and `2e-4`, while Qwen receives `9.25e-5` and `1.85e-4`. Pilot/smoke still honor compatible LR lists; sanity uses its presets. Supplied ranks, seeds, rates, and numeric controls must pass validation even when a mode overrides their selection.
+
+### `run`: additional option
+
+<!-- cli-options: run -->
+
+| Option | Default | Meaning and example |
+|---|---|---|
+| `--dry-run` | Off. | Print the plan and exit without training. Accepts the other `run` options. Example: `./run.sh run --models qwen2.5-1.5b --track lora --dry-run`. `plan` already does this, so `plan --dry-run` is not an accepted spelling. |
+
+### `prepare`: every option
+
+<!-- cli-options: prepare -->
+
+| Option and value | Default | Meaning and example |
+|---|---|---|
+| `--models MODEL ...` | All four fixed models. | Prefetch only these registry keys/exact checkpoint IDs and their tokenizers. Example: `--models qwen2.5-1.5b`. Models must belong to the fixed registry. |
+| `--output PATH` | `results` | Destination for selected-sample/tokenizer data provenance under `data/main/`. Model downloads use the Hugging Face cache, not this directory. Example: `./run.sh prepare --models qwen2.5-1.5b --output results`. |
+
+Also accepts `-h` and `--help`. It supports CPU preparation and has no `--cpu` option. Hugging Face authentication/cache environment variables are separate from CLI options.
+
+### `intruders`: every option
+
+<!-- cli-options: intruders -->
+
+| Option and value | Default | Meaning and example |
+|---|---|---|
+| `--models MODEL ...` | All four fixed models. | Analyze saved results only for these registry keys/exact checkpoint IDs. Example: `--models qwen2.5-1.5b qwen2.5-3b`. |
+| `--output PATH` | `results` | Exact results root to read, including its runs and projection cache. Unlike `run --mode smoke`, this command does not append a mode directory. Use `--output results/smoke` for smoke artifacts. |
+| `--threads N` | `4` | Positive integer CPU thread count used by Torch and the BLAS thread limiter. Example: `--threads 8`. This is not a GPU count. |
+| `--solver SOLVER` | `eigh` | Choose `eigh` (float64 Gram eigendecomposition for leading tuned vectors) or `svd` (direct fp32 SVD cross-check). Caches are separated, but active run summaries are replaced; complete a consistent pass. Example: `./run.sh intruders --output results --threads 4 --solver svd`. |
+
+Also accepts `-h` and `--help`. Spectral analysis is CPU-based; there is no `--cpu`, `--mode`, `--force`, rank, epsilon, or top-k CLI option for this command. Protocol constants govern the latter measurements.
+
+### `analyze`: every option
+
+<!-- cli-options: analyze -->
+
+| Option and value | Default | Meaning and example |
+|---|---|---|
+| `--output PATH` | `results` | Exact results root for aggregates and figures. Does not append a mode directory. Example: `./run.sh analyze --output results`. |
+| `--mode MODE` | `main` | Only `main` or `smoke` are accepted. Filters results by their stored mode; a pilot is stored as a reusable main configuration. Use `./run.sh analyze --output results/smoke --mode smoke` for smoke reports. Main-root analysis also reads available sanity results from its `sanity/` child. |
+
+Also accepts `-h` and `--help`. There is no model-selection flag here: analyze the compatible completed results in the selected root. A standalone `--mode sanity` or `--mode pilot` is not supported.
+
+### `doctor`: every option
+
+<!-- cli-options: doctor -->
+
+| Option and value | Default | Meaning and example |
+|---|---|---|
+| `--cpu` | Off; a usable GPU is required. | Validate the preparation/analysis imports without requiring or testing CUDA kernels. Example: `./run.sh doctor --cpu`. Does not enable CPU training. |
+| `--optimizer OPTIMIZER` | `adamw8bit` | Choose `adamw8bit` or `adamw`. The CUDA path tests bf16 matrix operations; `adamw8bit` additionally exercises a real bitsandbytes update. `adamw` omits that 8-bit-kernel requirement. Example: `./run.sh doctor --optimizer adamw`. This is a diagnostic selector, not the `run` optimizer-policy option. |
+
+Also accepts `-h` and `--help`. GPU checks require exactly one visible GPU and native bf16 support (Ampere or newer); a T4 is not supported by the training policy.
+
+### `list-models`: every option
+
+<!-- cli-options: list-models -->
+
+Only `-h` and `--help` are accepted. `./run.sh list-models` prints all fixed registry entries, licenses, nominal LRs, default ranks, and default seeds. It accepts no model filter or output-directory option.
+
+## 12. Related launcher options and environment variables
+
+These belong to other launchers or the shell; do not pass them to `run.sh` as additional CLI flags.
+
+| Launcher or variable | Options/default | Purpose |
+|---|---|---|
+| `./setup.sh` | `--cpu`: off; `--prefetch`: off; `-h` / `--help` for help. | `--cpu` installs CPU wheels for preparation/analysis; `--prefetch` additionally downloads pinned artifacts after setup and needs any required model access. |
+| `./run_parallel.sh GPU_IDS [RUN_OPTIONS]` | Required comma-separated GPU indices, such as `0,1`; forwards run options. | Starts one worker per listed GPU, assigning `--num-shards` and `--shard-index` itself. Do not supply another `run` word or your own shard options. |
+| `CUDA_VISIBLE_DEVICES` | Launcher default: `0`. | Choose one GPU per worker. Example: `CUDA_VISIBLE_DEVICES=1 ./run.sh doctor`. |
+| `OMP_NUM_THREADS` | Launcher default: `4`. | CPU thread baseline. `intruders --threads` separately sets its numerical thread limits. |
+| `TOKENIZERS_PARALLELISM` | Set to `false` by `run.sh`. | Disables tokenizer process/thread parallelism for the launched command. |
+| `CUBLAS_WORKSPACE_CONFIG` | Set to `:4096:8` by `run.sh`. | cuBLAS workspace policy used with reproducible execution; does not itself enable strict deterministic algorithms. |
+| `HF_TOKEN` | Unset unless supplied or authentication is cached. | Authorizes gated/private Hugging Face downloads. Do not commit its value. |
+| `HF_HOME` | Hugging Face library default unless exported. | Selects the external model cache location; it is not the experiment's `--output` directory. |
+| `WORKER_LOG_DIR` | `logs/parallel`. | Overrides the parallel launcher's worker-log directory. |
+| `PYTHON` | Automatically chosen by `setup.sh` unless supplied. | A supported Python interpreter for setup, such as `PYTHON=python3.11 ./setup.sh`. It is a setup variable; `run.sh` launches its activated environment's `python`. |
