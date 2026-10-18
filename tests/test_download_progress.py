@@ -70,6 +70,25 @@ class DownloadProgressTests(unittest.TestCase):
             self.assertTrue(lines[1].startswith("2026-10-18T06:10:00Z"))
             self.assertTrue(lines[1].endswith("  complete"))
 
+    def test_restart_appends_at_original_interval_instead_of_resetting_history(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            logger = DownloadProgressLog(temporary)
+            logger.path.parent.mkdir(parents=True)
+            previous = "2026-10-18T06:00:00Z  7.80 GB / 21.64 GB  (36.0%)  verified=80/140\n"
+            logger.path.write_text(previous)
+            logger.stop = Mock()
+            logger.stop.is_set.return_value = False
+            progress = {"downloaded_bytes": 8_000_000_000, "total_bytes": 21_640_000_000,
+                        "verified_runs": 81, "expected_runs": 140, "complete": False}
+            restarted = datetime(2026, 10, 18, 6, 5, tzinfo=timezone.utc)
+            with (patch("tools.download_progress.snapshot", side_effect=[progress, {**progress, "complete": True}]),
+                  patch("tools.download_progress.datetime", wraps=datetime) as clock):
+                clock.now.side_effect = [restarted, restarted + timedelta(minutes=5)]
+                logger.run()
+            logger.stop.wait.assert_called_once_with(300)
+            self.assertTrue(logger.path.read_text().startswith(previous))
+            self.assertEqual(len(logger.path.read_text().splitlines()), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

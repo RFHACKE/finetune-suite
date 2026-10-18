@@ -534,3 +534,25 @@ New `--test-lr` selections are **local to the output cohort**, so subsequent `pl
 The 2pp supplementary set requires all three mean diagonals within 2pp of the frozen full-FT reference and both earlier-task final-minus-diagonal changes at least −2pp. It requires all five ranks/seeds, a complete baseline, and a baseline that beats the majority accuracy on every task. The original SD-dependent window remains separately available. Intervals use paired seed differences and a Bonferroni 25-constraint family within each model/LR; they assume independent approximately normal seed differences and may remain inconclusive.
 
 Run `intruders` first to calculate new spectral measurements from boundary snapshots on CPU. LoRA update spectra use thin QR and an r×r SVD; full-FT update spectra need dense CPU decompositions. Effective rank uses singular-value probabilities, stable rank uses squared energy, and zero updates are explicitly flagged. Leading-subspace distance compares the leading reference/tuned spans, while the original intruder detector continues to compare individual tuned vectors with all base vectors. Cutoff relative gaps below `1e-3` are flagged as near ties. Charts include per-task gates, update/capacity/subspace curves and k=10/20 sensitivity; matrices are averaged within each run before seed variability is displayed.
+
+## 15. Resume the cloud result download
+
+For the completed 512/1024 cohort, restart interrupted retrieval from the
+repository root with:
+
+```bash
+python3 -m tools.watch_large_ranks --resume-download
+```
+
+The default target is `Finetune-result/large-ranks`; `--root PATH` changes it.
+This resumes saved partial archives, skips verified ones, manages the CPU
+download endpoint and spending guard, and starts no GPU training. If a
+downloader is already active, it reports that process and leaves it running.
+Keep the result directory and its `.download`/`.aria2` files. Progress appends
+to `execution/download-progress.log` under that target every ten minutes.
+
+The [Modal delivery reference](MODAL_EXECUTION.md#finished-cohort-segmented-delivery)
+documents all downloader options, saved settings and direct resumption while
+the endpoint is active. The [extension reference](LARGE_RANK_EXTENSION.md#cloud-execution-and-retrieval)
+documents all watcher options. `run.sh` continues to control suite training
+and analysis; these Python commands retrieve existing cloud results.

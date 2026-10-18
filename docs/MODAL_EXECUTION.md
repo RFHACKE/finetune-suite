@@ -99,18 +99,50 @@ executable. Its complete options are:
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--catalog` | `Finetune-result/execution/delivery-catalog.json` | Checked finished-cohort archive catalog. |
+| `--catalog` | Saved path, otherwise `TARGET/execution/delivery-catalog.json` | Checked finished-cohort archive catalog. |
 | `--target` | `Finetune-result` | Local cohort root; incompatible protocols are rejected. |
-| `--archive-volume` | `fyp-finetune-archive` | Named archive volume used by the shared verification helper. |
-| `--archive-url` | Required | Explicitly authorized HTTPS bearer-protected stream endpoint. |
-| `--access-file` | `.modal-state/stream-token` | Private token file; credentials never appear in process arguments. |
-| `--aria2` | `.bootstrap/aria2/usr/bin/aria2c` | Native executable; use an absolute system path if installed elsewhere. |
-| `--workers` | `16` | Positive concurrent archive count. |
-| `--connections` | `16` | HTTP range connections per archive, from 1 through 16. |
+| `--archive-volume` | Saved value, otherwise `fyp-finetune-archive` | Named archive volume used by the shared verification helper. |
+| `--archive-url` | Saved value | Explicitly authorized HTTPS bearer-protected stream endpoint; supply once for a fresh transfer. Completed targets need no endpoint. |
+| `--access-file` | Saved path, otherwise `.modal-state/stream-token` | Private token file; credentials never appear in process arguments. |
+| `--aria2` | Saved path, otherwise `.bootstrap/aria2/usr/bin/aria2c` | Native executable; use an absolute system path if installed elsewhere. |
+| `--workers` | Saved value, otherwise `16` | Positive concurrent archive count. |
+| `--connections` | Saved value, otherwise `16` | HTTP range connections per archive, from 1 through 16. |
 | `-h`, `--help` | — | Show help. |
 
 The US streaming function permits up to 16 CPU containers with 16 concurrent
 requests each. Native `.aria2` control files and partial data support resumption.
+Resumption is the default. Keep the entire result directory, especially
+`execution/retrieval.json`, `execution/incoming/*.download`, and their `.aria2`
+files. Verified runs are skipped, complete saved archives are checksum-checked
+and reused, and partial archives continue from saved segments. Native controls
+are saved every ten seconds. Ctrl+C or SIGTERM asks active native downloads to
+save their controls and stop; queued downloads are not started. A per-target
+lock and active-process check reject duplicate downloaders.
+
+Endpoint settings and credential **paths**, not credential values, are saved
+in `execution/download-settings.json`. From the repository root, repeat:
+
+```bash
+python3 -m tools.collect_delivery --target Finetune-result/large-ranks
+```
+
+This reuses the saved catalog, endpoint and transfer options while appending
+to the existing progress log. Explicit options override the saved values.
+The endpoint must still be deployed. For the 512/1024 cohort, the preferred
+restart command also redeploys its endpoint when needed, monitors spending,
+starts local CPU analysis as verified data arrives, and stops the endpoint:
+
+```bash
+python3 -m tools.watch_large_ranks --resume-download
+```
+
+It uses `Finetune-result/large-ranks` unless `--root` is supplied, reuses the
+existing catalog and metadata, and starts no GPU work. Both commands report
+an existing active downloader rather than starting a second transfer.
+An already completed target exits without any network downloads and retains
+its completed state. If an interrupted transfer's token file or endpoint is
+unavailable, restore that access before resuming; preserve the partial files.
+
 The segmented downloader automatically appends timestamped progress to
 `TARGET/execution/download-progress.log` at startup, every ten minutes, and on
 successful completion. For example:

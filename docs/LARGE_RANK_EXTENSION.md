@@ -125,6 +125,7 @@ python3 -m tools.watch_large_ranks --fetch-metadata --fetch-raw
 | `--max-seconds` | `21600` | Training/archiving observation lifetime; minimum 60. Reaching it does not cancel cloud work. Subsequent raw collection has its separate spending guard. |
 | `--fetch-metadata` | Off | After the exact 40-run cohort finishes and is archived, retrieve its checked metadata and charts using a CPU job. |
 | `--fetch-raw` | Off | Requires `--fetch-metadata`. Wait for the original cohort's downloads, then retrieve all 40 tensor archives with checksums and native resumption. Monitor the saved overall spending ceiling and retain remote data if that ceiling stops transfer. |
+| `--resume-download` | Off | Use by itself after an interruption. Reuse the existing delivery catalog/metadata and resume partial archives, manage the CPU endpoint and spending guard, and append to the same progress log. Rejects an already active downloader and starts no GPU training. |
 | `-h`, `--help` | — | Show help. |
 
 `execution/progress.json` explicitly distinguishes retrieved diagnostic

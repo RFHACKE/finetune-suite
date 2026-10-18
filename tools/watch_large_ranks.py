@@ -156,15 +156,31 @@ def main():
     parser.add_argument("--max-seconds", type=int, default=21600)
     parser.add_argument("--fetch-metadata", action="store_true")
     parser.add_argument("--fetch-raw", action="store_true")
+    parser.add_argument("--resume-download", action="store_true",
+                        help="Resume the saved raw delivery with endpoint lifecycle and budget monitoring; no training")
     args = parser.parse_args()
     if args.interval < 15 or args.max_seconds < 60:
         parser.error("interval >= 15 and max-seconds >= 60 are required")
     if args.fetch_raw and not args.fetch_metadata:
         parser.error("--fetch-raw requires --fetch-metadata")
+    if args.resume_download and (args.fetch_metadata or args.fetch_raw):
+        parser.error("Use --resume-download by itself")
     workspace = Path(__file__).resolve().parents[1]
     root = Path(args.root).resolve()
     execution = root / "execution"
     launch = json.loads((execution / "main-calls.json").read_text())
+    if args.resume_download:
+        from tools.collect_delivery import active_download
+        pid = active_download(root)
+        if pid:
+            raise SystemExit(f"Raw delivery is already running (PID {pid}); follow execution/download-progress.log")
+        state_path = execution / "retrieval.json"
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        if state.get("retrieval_finished"):
+            print("Raw delivery is already complete; no transfer started.", flush=True)
+            return
+        collect_raw(workspace, root, launch)
+        return
     recovery = json.loads((execution / "archive-recovery-call.json").read_text())
     calls = {"main": modal.FunctionCall.from_id(launch["call_id"]),
              "archive_recovery": modal.FunctionCall.from_id(recovery["call_id"])}

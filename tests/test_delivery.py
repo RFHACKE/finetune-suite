@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import tarfile
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -15,7 +16,8 @@ from unittest.mock import Mock, patch
 if importlib.util.find_spec("modal") is None:
     raise unittest.SkipTest("Optional Modal client SDK is required for cloud-helper tests")
 
-from tools.collect_delivery import SegmentedStream, extract_metadata
+from tools.collect_delivery import SegmentedStream, collect, extract_metadata
+from tools.collect_modal_results import Collector, canonical
 
 
 class DeliveryTests(unittest.TestCase):
@@ -75,11 +77,95 @@ class DeliveryTests(unittest.TestCase):
                 self.assertEqual(config.stat().st_mode & 0o777, 0o600)
                 self.assertIn(token.read_text(), config.read_text())
                 self.assertTrue(target.with_name(target.name + ".aria2").exists())
+                self.assertIn("--continue=true", command)
+                self.assertIn("--auto-save-interval=10", command)
                 target.write_bytes(data)
-                return SimpleNamespace(returncode=0)
-            with patch("tools.collect_delivery.subprocess.run", side_effect=download):
+                return Mock(returncode=0, communicate=lambda: (b"", b""))
+            with patch("tools.collect_delivery.subprocess.Popen", side_effect=download):
                 stream.download("/cohort/archives/model/run.tar.zst", SimpleNamespace(size=len(data)), target, expected)
             self.assertEqual(target.read_bytes(), data)
+
+    def test_complete_delivery_needs_no_endpoint_or_cloud_client(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            execution = root / "execution"
+            execution.mkdir()
+            protocol = {"frozen": "controls"}
+            (root / "protocol.json").write_text(json.dumps(protocol))
+            catalog = {"schema": "frw-completed-delivery-v1", "run": "cohort", "training_finished": True,
+                       "expected_runs": 1, "protocol_sha256": canonical(protocol),
+                       "archives": [{"run_id": "verified"}], "metadata": {"sha256": "metadata"}}
+            (execution / "delivery-catalog.json").write_text(json.dumps(catalog))
+            state = {"run": "cohort", "verified_runs": ["verified"], "retrieval_finished": True,
+                     "metadata_sha256": "metadata"}
+            state_path = execution / "retrieval.json"
+            state_path.write_text(json.dumps(state))
+            original = state_path.read_bytes()
+            args = SimpleNamespace(target=str(root), catalog=str(execution / "delivery-catalog.json"))
+            with (patch("tools.collect_delivery.Collector", side_effect=AssertionError("Unexpected cloud client")),
+                  redirect_stdout(io.StringIO()) as output):
+                collect(args)
+            self.assertTrue(json.loads(output.getvalue())["already_complete"])
+            self.assertEqual(state_path.read_bytes(), original)
+
+    def test_resume_keeps_partial_bytes_skips_verified_and_commits_before_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            execution = root / "execution"
+            incoming = execution / "incoming"
+            incoming.mkdir(parents=True)
+            (execution / "unattended").mkdir()
+            protocol = {"frozen": "controls"}
+            (root / "protocol.json").write_text(json.dumps(protocol))
+            records = [{"run_id": name, "archive": name + ".tar.zst", "remote_path":
+                        "cohort/archives/model/" + name + ".tar.zst", "archive_bytes": 7,
+                        "archive_sha256": hashlib.sha256(b"payload").hexdigest(),
+                        "includes_base_projections": False, "model": "model"}
+                       for name in ("verified", "pending")]
+            catalog = {"schema": "frw-completed-delivery-v1", "run": "cohort", "training_finished": True,
+                       "expected_runs": 2, "protocol_sha256": canonical(protocol),
+                       "archives": records, "metadata": {"sha256": "metadata"}}
+            catalog_path = execution / "delivery-catalog.json"
+            catalog_path.write_text(json.dumps(catalog))
+            (execution / "unattended/expected-grid.json").write_text(json.dumps(records))
+            state_path = execution / "retrieval.json"
+            state_path.write_text(json.dumps({"run": "cohort", "volume": "fyp-finetune-results", "files": {},
+                "verified_runs": ["verified"], "retrieval_finished": False, "metadata_sha256": "metadata"}))
+            for name in ("verified", "pending"):
+                folder = root / "runs" / name
+                folder.mkdir(parents=True)
+                (folder / "result.json").write_text(json.dumps({"run_id": name, "status": "completed"}))
+            partial = incoming / "pending.tar.zst.download"
+            partial.write_bytes(b"pay")
+            control = partial.with_name(partial.name + ".aria2")
+            control.write_bytes(b"saved segments")
+            def download(remote, entry, destination, expected_sha):
+                self.assertEqual(destination, partial)
+                self.assertEqual(destination.read_bytes(), b"pay")
+                self.assertEqual(control.read_bytes(), b"saved segments")
+                destination.write_bytes(b"payload")
+            stream = SimpleNamespace(download=Mock(side_effect=download), stop=Mock(),
+                                     stop_requested=threading.Event())
+            args = SimpleNamespace(target=str(root), catalog=str(catalog_path), workers=1,
+                archive_volume="archives", archive_url="https://example.modal.run", access_file="unused", aria2="unused",
+                connections=1)
+            def verify(_client, candidates, verified):
+                verified.update(candidates)
+            original_unlink = Path.unlink
+            def interrupted_cleanup(path, *args, **kwargs):
+                if path == incoming / "pending.tar.zst":
+                    raise KeyboardInterrupt("Simulated interruption after verification")
+                return original_unlink(path, *args, **kwargs)
+            with (patch("tools.collect_modal_results.modal.Volume.from_name", return_value=SimpleNamespace()),
+                  patch("tools.collect_delivery.SegmentedStream", return_value=stream),
+                  patch.object(Collector, "extract"), patch.object(Collector, "verify_candidates", new=verify),
+                  redirect_stdout(io.StringIO())):
+                with patch.object(Path, "unlink", new=interrupted_cleanup), self.assertRaises(KeyboardInterrupt):
+                    collect(args)
+                self.assertEqual(json.loads(state_path.read_text())["verified_runs"], ["pending", "verified"])
+                collect(args)
+            stream.download.assert_called_once()
+            self.assertTrue(json.loads(state_path.read_text())["retrieval_finished"])
 
     def test_completed_call_waits_for_valid_fresh_status_before_metadata_delivery(self):
         from tools import watch_large_ranks as watcher

@@ -87,7 +87,8 @@ class DownloadProgressLog:
                     progress = snapshot(self.root, self.catalog)
                     now = datetime.now(timezone.utc)
                     remaining = INTERVAL_SECONDS - (now - last_time).total_seconds() if last_time else 0
-                    if remaining <= 0 or (progress["complete"] and not already_complete):
+                    if ((remaining <= 0 and not (progress["complete"] and already_complete))
+                            or (progress["complete"] and not already_complete)):
                         self._write(log, progress, now)
                         last_time, remaining = now, INTERVAL_SECONDS
                     if progress["complete"] or self.stop.is_set():
