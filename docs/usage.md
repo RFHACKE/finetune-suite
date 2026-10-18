@@ -541,10 +541,14 @@ For the completed 512/1024 cohort, restart interrupted retrieval from the
 repository root with:
 
 ```bash
-python3 -m tools.watch_large_ranks --resume-download
+./start-download.sh
 ```
 
 The default target is `Finetune-result/large-ranks`; `--root PATH` changes it.
+The launcher changes to the repository directory, selects a Python interpreter
+with the Modal SDK, and runs `tools.watch_large_ranks --resume-download`.
+Set `MODAL_PYTHON=/path/to/python` to choose that interpreter explicitly.
+It accepts the watcher's arguments; `./start-download.sh --help` shows them.
 This resumes saved partial archives, skips verified ones, manages the CPU
 download endpoint and spending guard, and starts no GPU training. If a
 downloader is already active, it reports that process and leaves it running.

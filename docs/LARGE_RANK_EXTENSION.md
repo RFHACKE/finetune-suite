@@ -128,6 +128,12 @@ python3 -m tools.watch_large_ranks --fetch-metadata --fetch-raw
 | `--resume-download` | Off | Use by itself after an interruption. Reuse the existing delivery catalog/metadata and resume partial archives, manage the CPU endpoint and spending guard, and append to the same progress log. Rejects an already active downloader and starts no GPU training. |
 | `-h`, `--help` | — | Show help. |
 
+For download resumption, `./start-download.sh` is the executable shortcut for
+`python3 -m tools.watch_large_ranks --resume-download`. It selects Python with
+the Modal SDK installed; `MODAL_PYTHON=/path/to/python` overrides that choice.
+Pass `--root PATH` to select another local extension directory. It reports an
+already active or completed transfer without starting a second downloader.
+
 `execution/progress.json` explicitly distinguishes retrieved diagnostic
 records from raw scientific exports. The watcher uses the local frozen source
 for chart generation. It never retries or launches GPU training. Its local

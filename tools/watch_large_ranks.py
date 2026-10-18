@@ -173,12 +173,14 @@ def main():
         from tools.collect_delivery import active_download
         pid = active_download(root)
         if pid:
-            raise SystemExit(f"Raw delivery is already running (PID {pid}); follow execution/download-progress.log")
+            print(f"Raw delivery is already running (PID {pid}); follow {execution / 'download-progress.log'}", flush=True)
+            return
         state_path = execution / "retrieval.json"
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
         if state.get("retrieval_finished"):
             print("Raw delivery is already complete; no transfer started.", flush=True)
             return
+        print(f"Resuming saved downloads. Progress log: {execution / 'download-progress.log'}", flush=True)
         collect_raw(workspace, root, launch)
         return
     recovery = json.loads((execution / "archive-recovery-call.json").read_text())

@@ -133,12 +133,15 @@ restart command also redeploys its endpoint when needed, monitors spending,
 starts local CPU analysis as verified data arrives, and stops the endpoint:
 
 ```bash
-python3 -m tools.watch_large_ranks --resume-download
+./start-download.sh
 ```
 
 It uses `Finetune-result/large-ranks` unless `--root` is supplied, reuses the
 existing catalog and metadata, and starts no GPU work. Both commands report
 an existing active downloader rather than starting a second transfer.
+The shell launcher selects Python with the Modal SDK installed and invokes
+`tools.watch_large_ranks --resume-download`. `MODAL_PYTHON` overrides its
+interpreter selection; additional arguments are forwarded to the watcher.
 An already completed target exits without any network downloads and retains
 its completed state. If an interrupted transfer's token file or endpoint is
 unavailable, restore that access before resuming; preserve the partial files.
