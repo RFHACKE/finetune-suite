@@ -254,6 +254,9 @@ class ExperimentSpec:
     fail_fast: bool = True
     head_lr_multiplier: Optional[float] = None  # explicit > cohort policy > project track default
     calibrated_defaults: Optional[dict] = None  # validated output-cohort overrides
+    allow_overcomplete_ranks: bool = False  # explicit extension; r is factor width
+    epoch_diagnostics: bool = False  # observation only; never selects checkpoints
+    diagnostic_samples: int = 256  # fixed stratified train/validation probes
 
     def __post_init__(self):
         if not self.models or any(m not in MODELS for m in self.models):
@@ -262,9 +265,15 @@ class ExperimentSpec:
             raise ValueError("invalid track")
         if self.mode not in ("main", "pilot", "sanity", "smoke", "lr_test"):
             raise ValueError("invalid mode")
-        if not self.ranks or any(r <= 0 or r > min(MODELS[m].wv_out for m in self.models)
+        if not self.ranks or any(not isinstance(r, int) or isinstance(r, bool) or r <= 0
                                  for r in self.ranks):
-            raise ValueError("rank must be positive and no greater than the narrowest v projection")
+            raise ValueError("ranks must be positive integers")
+        if not self.allow_overcomplete_ranks and any(
+                r > min(MODELS[m].wv_out for m in self.models) for r in self.ranks):
+            raise ValueError("rank exceeds the narrowest v projection; explicitly enable "
+                             "--allow-overcomplete-ranks for a separate extension cohort")
+        if not isinstance(self.diagnostic_samples, int) or self.diagnostic_samples <= 0:
+            raise ValueError("diagnostic sample count must be a positive integer")
         if not self.seeds or any(s < 0 or s >= 2**32 for s in self.seeds):
             raise ValueError("seeds must be in [0, 2**32)")
         if self.train_samples <= 0 or self.epochs <= 0 or self.eval_batch <= 0:

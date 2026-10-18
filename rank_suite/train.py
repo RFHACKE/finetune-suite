@@ -70,12 +70,14 @@ def make_optimizer(params, lr, optimizer, head_params=(), head_lr_multiplier=1.0
 
 
 @torch.inference_mode()
-def evaluate(transformer, head, loader, device, prediction_path=None, return_details=False):
+def evaluate(transformer, head, loader, device, prediction_path=None, return_details=False,
+             save_scores=False):
     import numpy as np
     was_training, head_training = transformer.training, head.training
     transformer.eval()
     head.eval()
     predictions, labels = [], []
+    probabilities, example_nll = [], []
     nll_sum = 0.0
     for batch in loader:
         batch = _to_device(batch, device)
@@ -86,6 +88,9 @@ def evaluate(transformer, head, loader, device, prediction_path=None, return_det
         predictions.append(logits.argmax(dim=-1).cpu().numpy())
         labels.append(batch["labels"].cpu().numpy())
         nll_sum += float(F.cross_entropy(logits.float(), batch["labels"], reduction="sum"))
+        if save_scores:
+            probabilities.append(logits.float().softmax(dim=-1).cpu().numpy())
+            example_nll.append(F.cross_entropy(logits.float(), batch["labels"], reduction="none").cpu().numpy())
         if not math.isfinite(nll_sum):
             raise FloatingPointError("Nonfinite evaluation NLL")
     if not labels:
@@ -93,7 +98,9 @@ def evaluate(transformer, head, loader, device, prediction_path=None, return_det
     pred, gold = np.concatenate(predictions), np.concatenate(labels)
     if prediction_path is not None:
         Path(prediction_path).parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(prediction_path, predictions=pred, labels=gold)
+        scores = ({"probabilities": np.concatenate(probabilities),
+                   "example_nll": np.concatenate(example_nll)} if save_scores else {})
+        np.savez_compressed(prediction_path, predictions=pred, labels=gold, **scores)
     transformer.train(was_training)
     head.train(head_training)
     accuracy = float((pred == gold).mean())
@@ -101,7 +108,8 @@ def evaluate(transformer, head, loader, device, prediction_path=None, return_det
 
 
 def _train_task(transformer, head, params, loader, epochs, lr, optimizer,
-                device, log_path, global_step, task_key, accum=1, head_lr_multiplier=1.0):
+                device, log_path, global_step, task_key, accum=1, head_lr_multiplier=1.0,
+                epoch_callback=None):
     from transformers import get_cosine_schedule_with_warmup
     transformer.train()
     head.train()
@@ -166,6 +174,8 @@ def _train_task(transformer, head, params, loader, epochs, lr, optimizer,
                                 epoch + 1, global_step - initial_step, total_steps,
                                 total_loss / total_examples)
         epoch_losses.append(total_loss / total_examples)
+        if epoch_callback is not None:
+            epoch_callback(epoch + 1, global_step, epoch_losses[-1])
     return {"epoch_losses": epoch_losses, "flags": flags,
             "steps": global_step - initial_step, "global_step": global_step,
             "elapsed_s": time.monotonic() - start}
@@ -263,6 +273,8 @@ def _execute(run, run_dir, data, tokenizer, mspec, experiment, protocol_sha, har
         del state
         logger.info("Resume %s after %d tasks", run.run_id, next_task)
     _truncate_log(log_path, step)
+    if experiment.epoch_diagnostics:
+        _truncate_log(run_dir / "epoch_diagnostics.jsonl", step)
     for ti in range(next_task, len(run.task_keys)):
         key = run.task_keys[ti]
         for i, head in enumerate(heads):
@@ -270,9 +282,16 @@ def _execute(run, run_dir, data, tokenizer, mspec, experiment, protocol_sha, har
         params = base_params + list(heads[ti].parameters())
         loader = make_loader(data[key].train_dataset, experiment.micro_batch, True,
                              run.seed * 100 + ti, tokenizer)
+        diagnostic = None
+        if experiment.epoch_diagnostics:
+            from .overfitting import EpochDiagnostics
+            diagnostic = EpochDiagnostics(transformer, heads[ti], data[key], tokenizer,
+                                          run_dir, device, experiment.diagnostic_samples,
+                                          experiment.eval_batch)
         out = _train_task(transformer, heads[ti], params, loader, run.epochs,
                           run.lr, run.optimizer, device, log_path, step, key,
-                          accum=experiment.accum, head_lr_multiplier=run.head_lr_multiplier)
+                          accum=experiment.accum, head_lr_multiplier=run.head_lr_multiplier,
+                          epoch_callback=diagnostic)
         step = out["global_step"]
         flags["grad_spike_steps"].extend(out["flags"]["grad_spikes"])
         summaries[key] = {"epoch_losses": out["epoch_losses"], "steps": out["steps"],
@@ -348,7 +367,17 @@ def _execute(run, run_dir, data, tokenizer, mspec, experiment, protocol_sha, har
         "train_time_s": round(prior_elapsed + timer.elapsed, 3),
         "peak_vram_gb": (torch.cuda.max_memory_allocated() / 1e9
                          if str(device).startswith("cuda") else None),
+        "rank_semantics": {"factor_width": run.rank,
+                           "maximum_q_update_rank": min(run.rank, mspec.d_model) if run.rank else None,
+                           "maximum_v_update_rank": min(run.rank, mspec.wv_out) if run.rank else None,
+                           "overcomplete_factors_allowed": experiment.allow_overcomplete_ranks},
     }
+    if experiment.epoch_diagnostics:
+        from .overfitting import summarize_run
+        diagnostic_rows = [json.loads(line) for line in
+                           (run_dir / "epoch_diagnostics.jsonl").read_text().splitlines() if line.strip()]
+        result["overfitting"] = summarize_run(diagnostic_rows)
+        utils.save_json(run_dir / "overfitting.json", result["overfitting"])
     utils.save_json(run_dir / "result.json", result)
     resume_path.unlink(missing_ok=True)
     return result

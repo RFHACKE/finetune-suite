@@ -79,6 +79,13 @@ def experiment_controls(spec) -> dict:
         "micro_batch": spec.micro_batch, "accum": spec.accum, "eval_batch": spec.eval_batch,
         "warmup_frac": config.WARMUP_FRAC, "schedule": "cosine_per_task_fresh_optimizer",
         "alpha_factor": config.ALPHA_FACTOR, "lora_init": "kaiming_A_zero_B",
+        "rank_interpretation": ("overcomplete_factor_width_allowed"
+                                if spec.allow_overcomplete_ranks else "bounded_by_narrowest_v"),
+        "epoch_diagnostics": {"enabled": spec.epoch_diagnostics,
+                              "samples_per_split": spec.diagnostic_samples,
+                              "selection": "fixed_stratified_seed42",
+                              "rng_isolation": True, "model_selection": False,
+                              "nll_rise_threshold": 0.02, "train_nll_fall_threshold": 0.02},
         "targets": list(config.INTRUDER_MATRICES), "dropout": config.DROPOUT,
         "dtype": config.COMPUTE_DTYPE, "trainable_storage": "float32",
         "normalization_storage": "float32_both_tracks", "autocast_weight_cache": False,

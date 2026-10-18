@@ -53,6 +53,12 @@ def _add_run(p):
     p.add_argument("--mode", choices=("main", "pilot", "sanity", "smoke"), default="main",
                    help="pilot runs reusable main configurations; smoke/sanity are isolated")
     p.add_argument("--ranks", nargs="+", help="default: 4 8 16 32 64")
+    p.add_argument("--allow-overcomplete-ranks", action="store_true",
+                   help="explicit extension: permit factor widths above projection dimensions; use a separate output cohort")
+    p.add_argument("--epoch-diagnostics", action="store_true",
+                   help="record fixed train/validation probes each epoch without changing training or selecting checkpoints")
+    p.add_argument("--diagnostic-samples", type=int, default=256,
+                   help="examples per diagnostic split, capped by dataset size (default: 256)")
     p.add_argument("--seeds", nargs="+", help="default: 42 123 456 789 1024")
     p.add_argument("--lora-lrs", nargs="+", help="optional sensitivity rates, globally or key=rate,rate")
     p.add_argument("--full-lrs", nargs="+", help="optional sensitivity rates; fixed default baseline anchors the window")
@@ -87,6 +93,9 @@ def _make_spec(args):
         hourly_rate=args.hourly_rate, budget=args.budget, reserve=args.reserve,
         max_hours=args.max_hours, fail_fast=not args.keep_going,
         head_lr_multiplier=args.head_lr_multiplier,
+        allow_overcomplete_ranks=args.allow_overcomplete_ranks,
+        epoch_diagnostics=args.epoch_diagnostics,
+        diagnostic_samples=args.diagnostic_samples,
         calibrated_defaults={} if args.test_lr else None,
     )
 
