@@ -319,6 +319,12 @@ class Collector:
         self.state.update({"verified_runs": sorted(verified), "last_cycle_unix": time.time(),
                            "training_finished": len(journal.get("returned", {})) == len(MODELS),
                            "last_cycle_errors": failures})
+        expected_completed = max(len(candidates), sum(
+            value.get("completed", 0) + value.get("skipped", 0)
+            for value in journal.get("returned", {}).values()))
+        self.state["expected_completed_runs"] = expected_completed
+        self.state["retrieval_finished"] = bool(self.state["training_finished"] and not failures
+            and len(verified) >= expected_completed and set(candidates) <= verified)
         atomic_json(self.state_path, self.state)
         status = {"verified_completed_runs": len(verified), "retrieved_files": len(self.state["files"]),
                   "training_finished": self.state["training_finished"], "errors": failures,

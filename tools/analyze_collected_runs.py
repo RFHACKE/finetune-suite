@@ -14,6 +14,7 @@ import tempfile
 import time
 
 from rank_suite.intruder import analyze_intruders
+from rank_suite.protocol import source_digest
 from rank_suite.utils import get_logger
 
 
@@ -26,6 +27,9 @@ def main():
     parser.add_argument("--interval", type=int, default=60)
     args = parser.parse_args()
     root = Path(args.root).resolve()
+    protocol = json.loads((root / "protocol.json").read_text())
+    if protocol["source_sha256"] != source_digest():
+        raise ValueError("CPU analysis must import the frozen scientific source for this cohort")
     # Load SciPy's BLAS before the suite enters threadpool_limits. A library
     # first loaded inside that context otherwise escapes its thread limit.
     importlib.import_module("scipy.linalg")
@@ -50,7 +54,7 @@ def main():
                 print(json.dumps({"model": args.model, "pending_verified_runs": len(pending)}), flush=True)
                 result = analyze_intruders(view, models=[args.model], threads=args.threads)
                 print(json.dumps({"model": args.model, **result}), flush=True)
-        if not args.watch or (state.get("training_finished") and not pending):
+        if not args.watch or (state.get("retrieval_finished") and not pending):
             break
         time.sleep(max(5, args.interval))
 

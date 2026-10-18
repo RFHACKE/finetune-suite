@@ -75,3 +75,60 @@ The optional stream changes transport only. It retains the independent cloud arc
 The local analysis helper accepts `--root` (default `Finetune-result`), required `--model` (one fixed registry key), `--threads` (default 2), `--watch` (off by default), and `--interval` (default 60 seconds, minimum effective five). It processes only verified runs that still lack completed spectral diagnostics. Its temporary directory contains symlinks to the actual saved exports; the suite's unchanged analysis code writes results into the real run directories. Run one helper per model to overlap CPU analysis with GPU work. Neither collection nor local analysis starts cloud compute. The CPU packager has no CLI options; `FYP_MODAL_RUN` selects its run directory.
 
 After retrieval and spectral analysis finish, run `python -m tools.audit_requested_results --root Finetune-result`. Its only option is `--root`, with that same default. The audit writes `requested-completeness.json`, checking the exact 140 model/rank/seed combinations, shared controls, selected rates, data cardinalities, full optimizer logs, checkpoint sizes/checksums, saved predictions against reported accuracies, and completed spectral matrix counts. This requested-scope audit complements the suite's original full-FT-dependent completeness audit.
+
+## Finished-cohort segmented delivery
+
+For the finished sweep, `tools/modal_delivery.py` checks the exact preserved
+grid, all worker protocols/software and all archive sizes before producing one
+metadata bundle and `execution/delivery-catalog.json`. This avoids thousands
+of small remote reads. It accepts `--target` (default `Finetune-result`) for
+the local destination and `--inline-metadata` (off) to return and extract the
+checked metadata through authenticated Modal RPC. `FYP_MODAL_RUN` selects the
+remote cohort; use a separate target for each cohort. Common Modal `--profile`,
+`-h` and `--help` options are also available. It starts only CPU work.
+
+```bash
+modal run --detach tools/modal_delivery.py
+python3 -m tools.collect_delivery --archive-url "$FYP_ARCHIVE_URL"
+```
+
+The segmented collector requires `zstd`, `aria2c`, a finished catalog, and the
+previously authorized authenticated endpoint. Install the native utilities
+with the distribution's package manager, or pass the workspace-local aria2
+executable. Its complete options are:
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--catalog` | `Finetune-result/execution/delivery-catalog.json` | Checked finished-cohort archive catalog. |
+| `--target` | `Finetune-result` | Local cohort root; incompatible protocols are rejected. |
+| `--archive-volume` | `fyp-finetune-archive` | Named archive volume used by the shared verification helper. |
+| `--archive-url` | Required | Explicitly authorized HTTPS bearer-protected stream endpoint. |
+| `--access-file` | `.modal-state/stream-token` | Private token file; credentials never appear in process arguments. |
+| `--aria2` | `.bootstrap/aria2/usr/bin/aria2c` | Native executable; use an absolute system path if installed elsewhere. |
+| `--workers` | `16` | Positive concurrent archive count. |
+| `--connections` | `16` | HTTP range connections per archive, from 1 through 16. |
+| `-h`, `--help` | — | Show help. |
+
+The US streaming function permits up to 16 CPU containers with 16 concurrent
+requests each. Native `.aria2` control files and partial data support resumption.
+Each compressed archive must pass its independent cloud size and SHA-256;
+extracted projections and pretrained caches must also pass their checksums.
+An archive that arrives before its model's base cache waits for that dependency.
+Only verified runs are eligible for CPU spectral analysis. Metadata alone does
+not count as retrieved raw training data. `retrieval_finished` becomes true
+only after every requested archive is verified; the CPU watch helper waits
+for that condition rather than stopping when GPU training ends.
+
+CPU analysis must import the source recorded in the cohort's protocol. The
+original sweep used scientific source hash `ff3d682687b8ca5db927a383539cf816691c06a647c96c7b2750048f14d3fb16`,
+preserved in `Finetune-result/execution/frozen-checkout`. From the repository:
+
+```bash
+PYTHONPATH="$PWD/Finetune-result/execution/frozen-checkout" \
+  .venv/bin/python tools/analyze_collected_runs.py \
+  --model llama3.2-1b --threads 2 --watch
+```
+
+The separate [512/1024 extension](LARGE_RANK_EXTENSION.md) has its own source,
+protocol, expected grid, epoch diagnostics and local directory. Do not merge
+its files into the original cohort or apply the original 140-run audit to it.
