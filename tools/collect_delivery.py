@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from urllib.parse import quote
 
 from tools.collect_modal_results import ArchiveStream, Collector, atomic_json, canonical, sha256
+from tools.download_progress import DownloadProgressLog
 
 
 class SegmentedStream(ArchiveStream):
@@ -203,7 +204,8 @@ def main():
     args = parser.parse_args()
     if args.workers < 1 or not 1 <= args.connections <= 16:
         parser.error("workers must be positive; connections must be in [1,16]")
-    collect(args)
+    with DownloadProgressLog(args.target, args.catalog):
+        collect(args)
 
 
 if __name__ == "__main__":

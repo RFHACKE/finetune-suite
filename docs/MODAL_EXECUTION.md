@@ -111,6 +111,35 @@ executable. Its complete options are:
 
 The US streaming function permits up to 16 CPU containers with 16 concurrent
 requests each. Native `.aria2` control files and partial data support resumption.
+The segmented downloader automatically appends timestamped progress to
+`TARGET/execution/download-progress.log` at startup, every ten minutes, and on
+successful completion. For example:
+
+```text
+2026-10-18T06:00:00Z  7.80 GB / 21.64 GB  (36.0%)  verified=80/140
+```
+
+Timestamps use UTC (`Z`), and GB means decimal gigabytes. Progress counts the
+catalog's compressed experiment archives, including extracted/deleted archives
+and an estimate of partial transfers from allocated filesystem blocks. Sparse
+files' final logical lengths do not count as downloaded bytes. Metadata and
+unrelated files are excluded; verified archive counts are shown separately.
+Each cohort writes its own log. Entries append across restarts; the final
+completion entry can occur before the next ten-minute interval.
+
+To attach the same logger to an already running download without restarting it:
+
+```bash
+python3 -m tools.download_progress --target Finetune-result
+```
+
+This local observer accepts `--target` (default `Finetune-result`), `--catalog`
+(default `TARGET/execution/delivery-catalog.json`), and `-h`/`--help`. It logs
+immediately, then every 600 seconds, and exits after retrieval finishes. A file
+lock prevents duplicate writers. It uses no cloud compute and requires the
+computer to stay awake. Logger read errors go to
+`TARGET/execution/download-progress-errors.log`.
+
 Each compressed archive must pass its independent cloud size and SHA-256;
 extracted projections and pretrained caches must also pass their checksums.
 An archive that arrives before its model's base cache waits for that dependency.
