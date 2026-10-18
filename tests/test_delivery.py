@@ -5,6 +5,7 @@ from contextlib import redirect_stdout
 import io
 import json
 from pathlib import Path
+import signal
 import subprocess
 import tarfile
 import tempfile
@@ -107,6 +108,29 @@ class DeliveryTests(unittest.TestCase):
                 collect(args)
             self.assertTrue(json.loads(output.getvalue())["already_complete"])
             self.assertEqual(state_path.read_bytes(), original)
+
+    def test_pause_during_native_start_retains_partial_and_signals_new_child(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            executable = root / "aria2c"
+            executable.touch()
+            token = root / "token"
+            token.write_text("a-private-test-token-with-more-than-thirty-two-characters")
+            target = root / "partial.download"
+            target.write_bytes(b"saved")
+            control = root / "partial.download.aria2"
+            control.write_bytes(b"segments")
+            stream = SegmentedStream("https://example.modal.run", token, executable, 1)
+            child = Mock(returncode=1, communicate=lambda: (b"", b""))
+            def start(*_args, **_kwargs):
+                stream.stop()
+                return child
+            with (patch("tools.collect_delivery.subprocess.Popen", side_effect=start),
+                  self.assertRaises(OSError)):
+                stream.download("/cohort/archives/model/run.tar.zst", SimpleNamespace(size=100), target, "unused")
+            child.send_signal.assert_called_once_with(signal.SIGINT)
+            self.assertEqual(target.read_bytes(), b"saved")
+            self.assertEqual(control.read_bytes(), b"segments")
 
     def test_resume_keeps_partial_bytes_skips_verified_and_commits_before_cleanup(self):
         with tempfile.TemporaryDirectory() as temporary:

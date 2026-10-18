@@ -32,7 +32,7 @@ class SegmentedStream(ArchiveStream):
         self.executable = str(Path(executable).resolve())
         self.connections = connections
         self.stop_requested = threading.Event()
-        self.process_lock = threading.Lock()
+        self.process_lock = threading.RLock()
         self.processes = set()
         if not Path(self.executable).is_file():
             raise ValueError("Install aria2c or provide its executable with --aria2")
@@ -71,6 +71,8 @@ class SegmentedStream(ArchiveStream):
                     raise InterruptedError("Download paused; partial data retained")
                 result = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 self.processes.add(result)
+                if self.stop_requested.is_set():
+                    result.send_signal(signal.SIGINT)
             try:
                 stdout, stderr = result.communicate()
             finally:
