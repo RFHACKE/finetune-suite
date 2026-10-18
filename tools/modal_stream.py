@@ -18,8 +18,9 @@ import modal
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN = os.environ.get("FYP_MODAL_RUN", "frw-20261018")
+APP_NAME = os.environ.get("FYP_STREAM_APP", "fyp-archive-stream")
 vault = modal.Volume.from_name("fyp-finetune-archive")
-app = modal.App("fyp-archive-stream", include_source=False)
+app = modal.App(APP_NAME, include_source=False)
 
 
 def access_secret():
@@ -34,7 +35,7 @@ def access_secret():
 
 
 image = (modal.Image.debian_slim(python_version="3.11")
-         .env({"PYTHONPATH": "/app", "FYP_MODAL_RUN": RUN})
+         .env({"PYTHONPATH": "/app", "FYP_MODAL_RUN": RUN, "FYP_STREAM_APP": APP_NAME})
          .add_local_file(__file__, "/app/modal_stream.py", copy=True))
 
 

@@ -108,6 +108,44 @@ class DeliveryTests(unittest.TestCase):
             self.assertTrue((execution / "watch-finished.json").is_file())
             self.assertFalse((execution / "metadata-retrieval-deferred.json").exists())
 
+    def test_raw_transfer_waits_for_original_and_stops_its_own_endpoint_at_budget(self):
+        from tools import watch_large_ranks as watcher
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            original = workspace / "Finetune-result/execution"
+            original.mkdir(parents=True)
+            (original / "retrieval.json").write_text('{"retrieval_finished":false}')
+            (original / "active-budget.json").write_text('{"approved_total_usd":46}')
+            root = workspace / "Finetune-result/large-ranks"
+            (root / "execution").mkdir(parents=True)
+            (root / "execution/delivery-catalog.json").write_text('{}')
+            child = SimpleNamespace(pid=12345, returncode=None)
+            child.poll = lambda: child.returncode
+            def finish(timeout):
+                child.returncode = -2
+                return -2
+            child.wait = Mock(side_effect=finish)
+            def previous_finished(_seconds):
+                (original / "retrieval.json").write_text('{"retrieval_finished":true}')
+            def command(args, **kwargs):
+                if "billing" in args:
+                    return SimpleNamespace(returncode=0, stdout='{"metered_cost":"45.90"}')
+                return SimpleNamespace(returncode=0)
+            endpoint = SimpleNamespace(get_web_url=lambda: "https://isolated.modal.run")
+            with (patch.object(watcher.subprocess, "run", side_effect=command) as run,
+                  patch.object(watcher.subprocess, "Popen", return_value=child) as popen,
+                  patch.object(watcher.modal.Function, "from_name", return_value=endpoint),
+                  patch.object(watcher.time, "sleep", side_effect=previous_finished) as sleep,
+                  patch.object(watcher.os, "killpg") as kill):
+                watcher.collect_raw(workspace, root, {"run": "extension"})
+            self.assertEqual(sleep.call_count, 1)
+            self.assertIn("tools.collect_delivery", popen.call_args.args[0])
+            self.assertTrue((root / "execution/raw-delivery-budget-stop.json").exists())
+            self.assertFalse((root / "execution/raw-delivery-finished.json").exists())
+            self.assertEqual(kill.call_count, 1)
+            self.assertEqual(run.call_args.args[0][-1], "fyp-large-rank-stream")
+            self.assertTrue(all("modal_large_ranks.py" not in call.args[0] for call in run.call_args_list))
+
 
 if __name__ == "__main__":
     unittest.main()

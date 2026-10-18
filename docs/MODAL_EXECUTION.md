@@ -132,3 +132,8 @@ PYTHONPATH="$PWD/Finetune-result/execution/frozen-checkout" \
 The separate [512/1024 extension](LARGE_RANK_EXTENSION.md) has its own source,
 protocol, expected grid, epoch diagnostics and local directory. Do not merge
 its files into the original cohort or apply the original 140-run audit to it.
+For isolated retrieval services, `FYP_STREAM_APP` selects the streaming app
+name (default `fyp-archive-stream`), while `FYP_MODAL_RUN` scopes the archives
+it may serve. A distinct app prevents one cohort's finalizer from stopping
+another cohort's active transfer. These environment settings change transport,
+not training or scientific controls.

@@ -85,6 +85,7 @@ The runner uses one 48 GB L40S per model, four workers concurrently. CLI options
 | `--stage-budget` | `13.5` | Aggregate conservative GPU-worker allowance in USD; maximum 13.50. |
 | `--archive-only` | Off | Recover the CPU archiver and chart generation using the saved cohort journal; starts no GPU experiments. A saved recovery call prevents accidental duplicate starts. |
 | `--profile` | Active Modal profile | Modal's common CLI profile override. |
+| `--recover-model` | Empty | One explicit recovery of an identified hardware-provenance interruption, using the saved cohort. Keeps the same GPU name/capability, records small VRAM-capacity differences per attempt, and guards the combined original/recovery GPU cost at $13.50. |
 | `--help` | — | Modal-generated entrypoint help. |
 
 The approved additional operational cap is $15; $1.50 is reserved outside
@@ -114,15 +115,16 @@ recovery finish, it can retrieve the complete metadata/charts bundle through
 authenticated Modal RPC, independently of the much larger raw tensor transfer:
 
 ```bash
-python3 -m tools.watch_large_ranks --fetch-metadata
+python3 -m tools.watch_large_ranks --fetch-metadata --fetch-raw
 ```
 
 | Watcher option | Default | Meaning |
 |---|---|---|
 | `--root` | `Finetune-result/large-ranks` | Local cohort root with saved main and archive recovery call IDs. |
 | `--interval` | `60` | Polling seconds; minimum 15. Durable status snapshots are fetched at most every 120 seconds while running. |
-| `--max-seconds` | `21600` | Local watcher lifetime; minimum 60. Reaching it does not cancel cloud work. |
+| `--max-seconds` | `21600` | Training/archiving observation lifetime; minimum 60. Reaching it does not cancel cloud work. Subsequent raw collection has its separate spending guard. |
 | `--fetch-metadata` | Off | After the exact 40-run cohort finishes and is archived, retrieve its checked metadata and charts using a CPU job. |
+| `--fetch-raw` | Off | Requires `--fetch-metadata`. Wait for the original cohort's downloads, then retrieve all 40 tensor archives with checksums and native resumption. Monitor the saved overall spending ceiling and retain remote data if that ceiling stops transfer. |
 | `-h`, `--help` | — | Show help. |
 
 `execution/progress.json` explicitly distinguishes retrieved diagnostic
@@ -130,3 +132,19 @@ records from raw scientific exports. The watcher uses the local frozen source
 for chart generation. It never retries or launches GPU training. Its local
 process requires the laptop to remain awake; cloud training, raw data and
 remote charts persist independently if that process stops.
+
+Raw collection uses a separate, authenticated CPU endpoint named
+`fyp-large-rank-stream`, scoped only to this cohort and stopped after transfer
+or a spending stop. It reuses the previously authorized random-token access
+mechanism. The original endpoint is unaffected. The spending guard reads
+`Finetune-result/execution/active-budget.json` and checks account usage every
+five minutes, retaining a $0.25 margin. Transport retries are limited to three;
+there are no GPU retries. `execution/raw-delivery-*.json` distinguishes a
+complete verified download, a budget stop and a transport failure. Raw
+collection alone does not claim completed CPU spectral analysis or final audit.
+As verified raw exports arrive, the watcher starts local CPU spectral helpers
+with two threads per model and this cohort's frozen source. They save matrix
+diagnostics and caches independently of the downloader; their PIDs and logs
+are under `execution/cpu-workers.json` and `execution/cpu-<model>.log`.
+Only checksum-verified runs are analyzed. Full numerical/prediction auditing
+and final comparative analysis remain separate checks after collection.

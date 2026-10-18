@@ -44,7 +44,7 @@ def specification(path, model=None, **kwargs):
 @app.function(image=image, secrets=[hf_secret()], volumes={"/cache": cache, "/results": outputs},
               gpu="L40S", cpu=(2, 2), memory=(8192, 16384), timeout=14400,
               max_containers=4, single_use_containers=True, retries=0)
-def train_model(model, seconds):
+def train_model(model, seconds, infrastructure_recovery=False):
     import torch
     from rank_suite.runner import run_all
     from rank_suite.protocol import source_digest
@@ -57,6 +57,36 @@ def train_model(model, seconds):
     local.mkdir(parents=True, exist_ok=True)
     flush = durable_training(local, remote)
     try:
+        if infrastructure_recovery:
+            from rank_suite import runner
+            from rank_suite.protocol import immutable_json
+            attempt = str(time.time_ns())
+            history = local / "recovery-history" / attempt
+            history.mkdir(parents=True)
+            shutil.copy2(__file__, history / "runner.py")
+            if (local / "worker-error.json").exists():
+                shutil.copy2(local / "worker-error.json", history / "previous-worker-error.json")
+            for log in (local / "runs").glob("*/train_log.jsonl"):
+                if not (log.parent / "result.json").exists():
+                    shutil.copy2(log, history / (log.parent.name + ".jsonl"))
+            def hardware(root, key):
+                device = torch.cuda.current_device()
+                actual = {"name": torch.cuda.get_device_name(device),
+                          "capability": list(torch.cuda.get_device_capability(device)),
+                          "total_memory_bytes": torch.cuda.get_device_properties(device).total_memory}
+                path = root / "hardware" / f"{key}.json"
+                prior = json.loads(path.read_text()) if path.exists() else actual
+                if (actual["name"] != prior["name"] or actual["capability"] != prior["capability"]
+                        or actual["total_memory_bytes"] < 42 * 2**30
+                        or abs(actual["total_memory_bytes"] / prior["total_memory_bytes"] - 1) > .05):
+                    raise ValueError("Recovery must keep the same L40S model/capability and comparable VRAM")
+                immutable_json(root / "hardware" / f"{key}-attempt-{attempt}.json", actual)
+                if not path.exists():
+                    immutable_json(path, actual)
+                save(history / "hardware-provenance.json", {"prior": prior, "observed": actual,
+                     "policy": "Same GPU family/capability; record small physical VRAM variation without changing training"})
+                return actual
+            runner.register_hardware = hardware
         spec = specification(local, model, max_hours=max(60, seconds - 90) / 3600,
                              hourly_rate=RATE)
         result = run_all(spec)
@@ -272,11 +302,124 @@ def coordinate(seconds, stage_budget):
             "counts": report["counts"], "budget": report["budget"], "archive_result": archived}
 
 
+@app.function(image=image, volumes={"/results": outputs, "/vault": vault.with_mount_options(read_only=True)},
+              cpu=(0.125, 0.5), memory=(256, 2048), timeout=21600,
+              single_use_containers=True, retries=0)
+def recover_worker(model, seconds, original_archive_call):
+    """One explicit infrastructure recovery; jointly guard old and new GPUs."""
+    from tools.preservation import inventory, read_json, csv_summary
+    base = Path("/results") / RUN
+    recovery = base / "execution/recovery"
+    original = read_json(base / "execution/main-workers.json")
+    outcome = original.get("returned", {}).get(model, {})
+    if "hardware" not in outcome.get("error", ""):
+        raise ValueError("Only the identified hardware-provenance interruption is admitted")
+    expected = read_json(base / "execution/expected-grid.json")
+    recovery.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(__file__, recovery / "source-runner.py")
+    start = time.monotonic()
+    call = train_model.with_options(timeout=seconds).spawn(model, seconds, True)
+    save(recovery / "call.json", {"model": model, "call_id": call.object_id,
+         "original_outcome": outcome, "gpu_stage_cap_usd": 13.5, "automatic_training_retries": False})
+    outputs.commit()
+    result = None
+    finish = None
+    while True:
+        outputs.reload()
+        original = read_json(base / "execution/main-workers.json", original)
+        if result is None:
+            try:
+                result = call.get(timeout=0)
+                finish = time.monotonic()
+            except (TimeoutError, modal.exception.TimeoutError):
+                pass
+            except Exception as exc:
+                result = {"status": "worker_failed", "error": repr(exc)}
+                finish = time.monotonic()
+        ceiling = original.get("conservative_resource_cost_usd", 0) + ((finish or time.monotonic()) - start) * RATE / 3600 + .05
+        if ceiling >= 13.35 and (result is None or len(original.get("returned", {})) < 4):
+            if result is None:
+                call.cancel(terminate_containers=True)
+                result = {"status": "budget_deferred", "checkpoints_preserved": True}
+                finish = time.monotonic()
+            for key, identifier in original["calls"].items():
+                if key not in original.get("returned", {}):
+                    modal.FunctionCall.from_id(identifier).cancel(terminate_containers=True)
+        merged = dict(original)
+        merged["returned"] = dict(original.get("returned", {}))
+        if result is None:
+            merged["returned"].pop(model, None)
+        else:
+            merged["returned"][model] = result
+        merged["conservative_resource_cost_usd"] = ceiling
+        vault.reload()
+        report = inventory(base, Path("/vault") / RUN, expected, merged, merged["returned"])
+        report.update({"recovery_history": {model: outcome}, "updated_unix": time.time()})
+        report["budget"] = {"approved_additional_usd": 15, "gpu_stage_cap_usd": 13.5,
+                            "combined_conservative_gpu_cost_usd": ceiling}
+        save(recovery / "main-workers.json", merged)
+        save(recovery / "status.json", report)
+        save(recovery / "retry-plan.json", {"automatic_retry": False, "candidates": report["retry_candidates"]})
+        outputs.commit()
+        if result is not None and len(original.get("returned", {})) == 4:
+            break
+        time.sleep(15)
+    # Finish CPU packaging only after all original and recovered GPU work ends.
+    try:
+        modal.FunctionCall.from_id(original_archive_call).get(timeout=120)
+    except (TimeoutError, modal.exception.TimeoutError):
+        modal.FunctionCall.from_id(original_archive_call).cancel(terminate_containers=True)
+    except Exception:
+        pass
+    archive = archive_and_plot.spawn(recovery_note={"model": model, "reason": "CPU finalization after explicit hardware recovery"})
+    save(recovery / "archive-call.json", {"call_id": archive.object_id})
+    outputs.commit()
+    archived = archive.get(timeout=21000)
+    outputs.reload()
+    vault.reload()
+    final = inventory(base, Path("/vault") / RUN, expected, merged, merged["returned"])
+    final.update({"recovery_history": {model: outcome}, "archive_result": archived,
+                  "updated_unix": time.time(), "budget": report["budget"]})
+    if all(row["state"] == "completed" for row in final["runs"] if row["model"] == model):
+        historical = final["worker_errors"].pop(model, None)
+        final["historical_worker_errors"] = {model: historical} if historical else {}
+    for path in (recovery / "status.json", base / "execution/status.json"):
+        save(path, final)
+    save(base / "execution/retry-plan.json", {"automatic_retry": False, "candidates": final["retry_candidates"]})
+    (base / "execution/runs.csv").write_text(csv_summary(final["runs"]))
+    outputs.commit()
+    return {"completed": final["completed_sequences"], "archived": final["archived_sequences"],
+            "budget": final["budget"], "counts": final["counts"], "archive_result": archived}
+
+
 @app.local_entrypoint()
-def main(seconds: int = 14400, stage_budget: float = 13.5, archive_only: bool = False):
+def main(seconds: int = 14400, stage_budget: float = 13.5, archive_only: bool = False,
+         recover_model: str = ""):
     if not 120 <= seconds <= 18000 or not 0 < stage_budget <= 13.5:
         raise ValueError("Use 120–18000 seconds and a positive GPU stage cap no greater than $13.50")
     LOCAL.mkdir(parents=True, exist_ok=True)
+    if recover_model:
+        path = LOCAL / "infrastructure-recovery-call.json"
+        if recover_model not in MODELS or path.exists():
+            raise ValueError("Choose one fixed model; an existing recovery record prevents duplicate GPUs")
+        original = json.loads((LOCAL / "main-calls.json").read_text())
+        prior_archive = json.loads((LOCAL / "archive-recovery-call.json").read_text())
+        call = recover_worker.spawn(recover_model, seconds, prior_archive["call_id"])
+        record = {**original, "call_id": call.object_id, "app_id": app.app_id,
+                  "status_path": "execution/recovery/status.json", "recovered_model": recover_model,
+                  "original_coordinator_call_id": original["call_id"], "started_unix": time.time(),
+                  "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+        save(LOCAL / "initial-main-calls.json", original)
+        save(LOCAL / "initial-archive-recovery-call.json", prior_archive)
+        save(path, record)
+        save(LOCAL / "main-calls.json", record)
+        save(LOCAL / "archive-recovery-call.json", {"call_id": call.object_id,
+             "role": "durable_parent_includes_final_archiving", "gpu": None})
+        print(json.dumps(record, indent=2), flush=True)
+        returned = call.get()
+        save(LOCAL / "infrastructure-recovery-returned.json", returned)
+        print(json.dumps(returned), flush=True)
+        return
     if archive_only:
         path = LOCAL / "archive-recovery-call.json"
         if path.exists():
