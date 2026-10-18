@@ -174,6 +174,12 @@ immediately, then every 600 seconds, and exits after retrieval finishes. A file
 lock prevents duplicate writers. It uses no cloud compute and requires the
 computer to stay awake. Logger read errors go to
 `TARGET/execution/download-progress-errors.log`.
+Failed native transfers retain their diagnostics beside the partial archive
+as `*.download.error.log`, with bearer tokens redacted. Native progress bars
+are disabled; errors remain enabled so a transfer failure is distinguishable
+from normal partial progress. A run enters the `verified` count only after
+its complete archive and the required local reference/adapted projections
+pass their checksum checks.
 
 Each compressed archive must pass its independent cloud size and SHA-256;
 extracted projections and pretrained caches must also pass their checksums.

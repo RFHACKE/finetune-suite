@@ -64,7 +64,8 @@ class SegmentedStream(ArchiveStream):
                        f"--max-connection-per-server={self.connections}", f"--split={self.connections}",
                        "--min-split-size=1M", "--max-tries=8", "--retry-wait=3", "--connect-timeout=30",
                        "--timeout=300", "--lowest-speed-limit=0", "--summary-interval=0",
-                       "--download-result=hide", "--console-log-level=error", "--quiet=true",
+                       "--download-result=hide", "--console-log-level=error", "--quiet=false",
+                       "--show-console-readout=false",
                        "--input-file=" + str(config)]
             with self.process_lock:
                 if self.stop_requested.is_set():
