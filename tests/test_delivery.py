@@ -1,5 +1,7 @@
 """Transport changes preserve bytes, credentials and completed CPU results."""
 import hashlib
+import importlib.util
+from contextlib import redirect_stdout
 import io
 import json
 from pathlib import Path
@@ -8,7 +10,10 @@ import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+if importlib.util.find_spec("modal") is None:
+    raise unittest.SkipTest("Optional Modal client SDK is required for cloud-helper tests")
 
 from tools.collect_delivery import SegmentedStream, extract_metadata
 
@@ -75,6 +80,33 @@ class DeliveryTests(unittest.TestCase):
             with patch("tools.collect_delivery.subprocess.run", side_effect=download):
                 stream.download("/cohort/archives/model/run.tar.zst", SimpleNamespace(size=len(data)), target, expected)
             self.assertEqual(target.read_bytes(), data)
+
+    def test_completed_call_waits_for_valid_fresh_status_before_metadata_delivery(self):
+        from tools import watch_large_ranks as watcher
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            execution = root / "execution"
+            execution.mkdir()
+            (execution / "main-calls.json").write_text(json.dumps({
+                "call_id": "main", "results_volume": "results", "run": "cohort"}))
+            (execution / "archive-recovery-call.json").write_text('{"call_id":"archive"}')
+            (execution / "status.json").write_text('{"completed_sequences":0,"archived_sequences":0}')
+            finished = {"counts": {"completed": 40}, "completed_sequences": 40,
+                        "archived_sequences": 40, "training_finished": True, "runs": []}
+            volume = SimpleNamespace(read_file=Mock(side_effect=[[b""], [json.dumps(finished).encode()]]))
+            call = SimpleNamespace(get=lambda timeout: {"complete": True})
+            with (patch.object(watcher.modal.FunctionCall, "from_id", return_value=call),
+                  patch.object(watcher.modal.Volume, "from_name", return_value=volume),
+                  patch.object(watcher.time, "sleep"),
+                  patch.object(watcher.subprocess, "run", return_value=SimpleNamespace(returncode=0)) as run,
+                  patch("sys.argv", ["watcher", "--root", str(root), "--fetch-metadata"]),
+                  redirect_stdout(io.StringIO())):
+                watcher.main()
+            self.assertEqual(volume.read_file.call_count, 2)
+            self.assertEqual(run.call_count, 1)
+            self.assertIn("--inline-metadata", run.call_args.args[0])
+            self.assertTrue((execution / "watch-finished.json").is_file())
+            self.assertFalse((execution / "metadata-retrieval-deferred.json").exists())
 
 
 if __name__ == "__main__":

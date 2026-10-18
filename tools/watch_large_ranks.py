@@ -65,6 +65,7 @@ def main():
         return run_id
 
     while time.monotonic() - started < args.max_seconds:
+        snapshot_good = False
         for key, call in calls.items():
             if key in results:
                 continue
@@ -80,6 +81,7 @@ def main():
             try:
                 raw = b"".join(volume.read_file(f"/{launch['run']}/execution/status.json"))
                 status = json.loads(raw)
+                snapshot_good = True
                 save(execution / "status.json", status)
                 pending = [row for row in status["runs"]
                            if row["state"] == "completed" and row["run_id"] not in retrieved]
@@ -116,7 +118,7 @@ def main():
                 errors.append({"error": repr(exc), "unix": time.time()})
                 save(execution / "watch-errors.json", errors)
             last_snapshot = time.monotonic()
-        if len(results) == len(calls):
+        if len(results) == len(calls) and snapshot_good:
             if args.fetch_metadata:
                 status = json.loads((execution / "status.json").read_text())
                 if status["completed_sequences"] == 40 and status["archived_sequences"] == 40:
