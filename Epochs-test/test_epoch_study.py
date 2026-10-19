@@ -11,7 +11,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from epoch_study import EPOCH_BUDGETS, SEEDS, expected_grid, observation_rng, protocol  # noqa: E402
-from build_reports import analyze, scheduled_lr, verdict  # noqa: E402
+from build_reports import analyze, scheduled_lr, seed_diagnostics, verdict  # noqa: E402
 from rank_suite import utils  # noqa: E402
 from rank_suite.protocol import digest  # noqa: E402
 
@@ -235,6 +235,32 @@ def test_wrong_schedule_is_rejected(tmp_path):
     assert "schedule" in summary["rejected"][0]["reason"]
 
 
+def test_joint_regression_is_not_mislabeled_as_simple_overfitting():
+    base = {"model": "qwen2.5-3b", "seed": 42, "is_endpoint": True}
+    diagnostic = seed_diagnostics(
+        [
+            {
+                **base,
+                "epoch_budget": 3,
+                "train_nll": 0.03,
+                "validation_nll": 0.3,
+                "validation_accuracy": 0.95,
+            },
+            {
+                **base,
+                "epoch_budget": 6,
+                "train_nll": 0.17,
+                "validation_nll": 0.54,
+                "validation_accuracy": 0.8,
+            },
+        ]
+    )
+    regression = diagnostic["accuracy_regressions"][0]
+    assert regression["both_losses_increased"]
+    assert not regression["loss_overfitting_direction"]
+    assert regression["accuracy_change_pp"] == pytest.approx(-15)
+
+
 def test_documents_open_and_preserve_contrary_findings(tmp_path):
     from build_reports import build
     from docx import Document
@@ -246,9 +272,9 @@ def test_documents_open_and_preserve_contrary_findings(tmp_path):
     document = Document(tmp_path / "reports/epoch-study.docx")
     text = "\n".join(p.text for p in document.paragraphs)
     assert "not supported" in text and "not 168 independent replications" in text
-    assert len(document.inline_shapes) == 13
+    assert len(document.inline_shapes) == 14
     slides = Presentation(tmp_path / "reports/epoch-study.pptx")
-    assert len(slides.slides) == 22
+    assert len(slides.slides) == 24
     for slide in slides.slides:
         for shape in slide.shapes:
             assert shape.left >= 0 and shape.top >= 0

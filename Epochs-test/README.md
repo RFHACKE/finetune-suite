@@ -134,6 +134,41 @@ systemctl status fyp-epoch-independent-results.service
 
 The original downloader has its own service and remains running independently.
 
+## Completed findings (2026-10-19)
+
+All **48 fits / 168 observations / 26,208 optimizer steps** passed validation.
+Training took approximately **31 minutes** with four parallel L40S workers.
+The conservative GPU/CPU/RAM resource estimate is **$3.05**; provider billing
+can lag, and CPU delivery plus the separately running download incur small
+additional charges. Receipts retain the observed account readings and estimates.
+The controls, raw measurements and primary comparison are unchanged by CPU
+analysis revision 2. Descriptive preferences among the six tested budgets are:
+
+| Model | Lowest mean validation NLL | Highest mean validation accuracy |
+|---|---:|---:|
+| Llama-3.2-1B | 2 epochs | 4 epochs |
+| Qwen2.5-1.5B | 1 epoch | 5 epochs |
+| Granite3.3-2B | 2 epochs | 4 epochs |
+| Qwen2.5-3B | 1 epoch | 4 epochs |
+
+The full hypothesis that three epochs are best for every model and all larger
+budgets consistently overfit is **not supported**. Differences are descriptive,
+with only two seeds and reused validation data. Probability loss and accuracy
+prefer different budgets; close minima should not be overinterpreted.
+
+Revision 2 adds an explicitly **post-hoc** individual-seed chart and explanation
+of accuracy regressions of at least two percentage points versus budget3. This
+screen does not change the predeclared analysis or remove any fit. Granite's
+five-epoch seed42 fit falls from **95.99% to 88.88%**; Qwen-3B's six-epoch seed42
+fit falls from **95.41% to 79.93%**. Their training NLL rises versus budget3,
+so these cases cannot both be labeled simple improving-train/worsening-validation
+overfitting. Their mechanisms are not established by this study.
+
+The initial reports remain under `results/cpu-analysis-v1/reports/`; the final
+reports are under `results/reports/`. Revision2 source is saved remotely under
+`execution/analysis-v2/`, alongside the original frozen training/analysis source.
+No additional GPU training is used for these diagnostics.
+
 ## Primary sources
 
 - Hu et al., LoRA: https://arxiv.org/abs/2106.09685

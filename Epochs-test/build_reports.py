@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import shutil
 
 import numpy as np
 
@@ -285,7 +286,7 @@ def analyze(root):
     )
     summary = {
         "schema": "independent-epoch-budget-analysis-v1",
-        "analysis_revision": 1,
+        "analysis_revision": 2,
         "analysis_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "complete": complete,
         "expected_runs": len(grid),
@@ -304,6 +305,7 @@ def analyze(root):
         "seeds": list(SEEDS),
         "paired_initializations_verified": len(paired_initializations),
         "labels_sha256": label_checksums,
+        "exploratory_seed_diagnostics": seed_diagnostics(records),
         "created_utc": datetime.now(timezone.utc).isoformat(),
     }
     return summary, records, times, control
@@ -329,6 +331,55 @@ def model_statement(model, data):
 
 def fmt(stat, scale=1, digits=3):
     return f"{stat['mean'] * scale:.{digits}f} ± {stat['sd'] * scale:.{digits}f}"
+
+
+def seed_diagnostics(records):
+    """Post-hoc description; never changes the predeclared endpoint verdict."""
+    endpoint = [r for r in records if r["is_endpoint"]]
+    reference = {(r["model"], r["seed"]): r for r in endpoint if r["epoch_budget"] == 3}
+    paired = []
+    for row in endpoint:
+        ref = reference.get((row["model"], row["seed"]))
+        if row["epoch_budget"] not in (4, 5, 6) or ref is None:
+            continue
+        train = row["train_nll"] - ref["train_nll"]
+        validation = row["validation_nll"] - ref["validation_nll"]
+        paired.append(
+            {
+                "model": row["model"],
+                "seed": row["seed"],
+                "epoch_budget": row["epoch_budget"],
+                "accuracy_at3_pct": 100 * ref["validation_accuracy"],
+                "accuracy_pct": 100 * row["validation_accuracy"],
+                "accuracy_change_pp": 100 * (row["validation_accuracy"] - ref["validation_accuracy"]),
+                "train_nll_at3": ref["train_nll"],
+                "train_nll": row["train_nll"],
+                "validation_nll_at3": ref["validation_nll"],
+                "validation_nll": row["validation_nll"],
+                "train_nll_change": train,
+                "validation_nll_change": validation,
+                "loss_overfitting_direction": train < 0 and validation > 0,
+                "both_losses_increased": train > 0 and validation > 0,
+            }
+        )
+    return {
+        "post_hoc": True,
+        "reference_budget": 3,
+        "screen": "validation accuracy drops by at least 2 percentage points versus budget3 within a seed; descriptive flag only, not a significance test or an exclusion rule",
+        "pairs": paired,
+        "accuracy_regressions": [r for r in paired if r["accuracy_change_pp"] <= -2],
+    }
+
+
+def seed_statement(row):
+    return (
+        f"{config.MODELS[row['model']].label}, seed {row['seed']}, {row['epoch_budget']} epochs: "
+        f"validation accuracy {row['accuracy_at3_pct']:.2f}% → {row['accuracy_pct']:.2f}% "
+        f"({row['accuracy_change_pp']:+.2f} percentage points versus budget 3). "
+        f"Train NLL {row['train_nll_at3']:.4f} → {row['train_nll']:.4f}; "
+        f"validation NLL {row['validation_nll_at3']:.4f} → {row['validation_nll']:.4f}. "
+        f"Simple loss-overfitting direction: {'yes' if row['loss_overfitting_direction'] else 'no'}."
+    )
 
 
 def figures(root, summary, records):
@@ -506,6 +557,46 @@ def figures(root, summary, records):
     fig.suptitle("Endpoint probability quality | Brier score; mean ± sample SD", fontsize=13)
     save(fig, "brier-overview")
 
+    fig, axes = plt.subplots(2, 2, figsize=(11.2, 6.5), layout="constrained")
+    minimum = min(75.0, min((100 * r["validation_accuracy"] - 2 for r in endpoint), default=75.0))
+    for ax, model in zip(axes.flat, MODELS):
+        for seed, color, marker in zip(SEEDS, (blue, orange), ("o", "D")):
+            selected = sorted(
+                [r for r in endpoint if r["model"] == model and r["seed"] == seed],
+                key=lambda r: r["epoch_budget"],
+            )
+            ax.plot(
+                [r["epoch_budget"] for r in selected],
+                [100 * r["validation_accuracy"] for r in selected],
+                label=f"Seed {seed}",
+                color=color,
+                marker=marker,
+                lw=2,
+            )
+        for row in summary["exploratory_seed_diagnostics"]["accuracy_regressions"]:
+            if row["model"] == model:
+                ax.annotate(
+                    f"{row['accuracy_pct']:.1f}%",
+                    (row["epoch_budget"], row["accuracy_pct"]),
+                    xytext=(0, -16),
+                    textcoords="offset points",
+                    ha="center",
+                    fontsize=10,
+                )
+        ax.set_title(config.MODELS[model].label)
+        ax.set_xticks(EPOCH_BUDGETS)
+        ax.set_ylim(minimum - 1, 100.5)
+        ax.set_xlabel("Planned epoch budget (fresh fit)")
+        ax.set_ylabel("Validation accuracy (%)")
+        ax.axvline(3, color="grey", ls=":", lw=1)
+        ax.legend(fontsize=9, loc="lower left")
+        ax.grid(alpha=0.2)
+    fig.suptitle(
+        "Individual seeds reveal large accuracy regressions\nExploratory annotations flag drops ≥2 percentage points versus budget 3",
+        fontsize=13,
+    )
+    save(fig, "individual-seed-accuracy")
+
     fig, ax = plt.subplots(figsize=(10.5, 4.7), layout="constrained")
     for budget in EPOCH_BUDGETS:
         steps = np.arange(STEPS_PER_EPOCH * budget)
@@ -643,6 +734,19 @@ def word_report(root, summary, control, paths):
             "Each panel is a separate planned budget. Points show full-set NLL after each epoch, averaged over two fresh fits; shaded bands show sample SD. These curves describe training progress within a schedule and are not additional endpoint replications.",
             "Caption",
         )
+    doc.add_heading("Exploratory seed-level regressions", 1)
+    doc.add_paragraph(
+        "This post-hoc explanation flags validation-accuracy falls of at least two percentage points relative to budget 3 within the same seed. The threshold is a descriptive aid, not a significance test, exclusion rule or change to the primary analysis. Every fit remains in the averages. It separates large accuracy regressions from the predeclared loss-overfitting screen."
+    )
+    doc.add_picture(str(paths["individual-seed-accuracy"]), width=Inches(6.7))
+    regressions = summary["exploratory_seed_diagnostics"]["accuracy_regressions"]
+    for row in regressions:
+        doc.add_paragraph(seed_statement(row))
+    if not regressions:
+        doc.add_paragraph("No paired fit meets the exploratory two-percentage-point accuracy-drop screen.")
+    doc.add_paragraph(
+        "A worse training loss together with worse validation loss is a joint regression, rather than the simple improving-training/worsening-validation signature. A fall in accuracy with a fall in NLL can reflect changes in confidence or the decision boundary. These observations alone do not establish an optimization mechanism or prove that overfitting caused a particular collapse. No seed is removed or rerun to improve the averages. With only two seeds, such cases materially affect the means and SD."
+    )
     doc.add_heading("Probability quality", 1)
     doc.add_picture(str(paths["brier-overview"]), width=Inches(6.7))
     doc.add_paragraph(
@@ -771,6 +875,20 @@ def presentation(root, summary, control, paths):
             note="Each panel is a different fresh planned budget. Full-set train/validation NLL; shaded bands = two-seed SD.",
         )
     slide(
+        "Individual seeds reveal large accuracy regressions",
+        chart=paths["individual-seed-accuracy"],
+        note="Exploratory: annotations flag drops ≥2 percentage points versus budget 3 within a seed. All fits remain in the means.",
+    )
+    regressions = summary["exploratory_seed_diagnostics"]["accuracy_regressions"]
+    slide(
+        "A regression is not automatically simple overfitting",
+        "\n\n".join(seed_statement(r) for r in regressions)
+        if regressions
+        else "No paired fit meets the exploratory two-percentage-point accuracy-drop screen.",
+        note="Post-hoc explanation only. Both losses rising differs from improving training/worsening validation. The mechanism is not established.",
+        size=20,
+    )
+    slide(
         "Probability quality: Brier score",
         chart=paths["brier-overview"],
         note="Lower is better. NLL can rise if remaining mistakes become more confident even while accuracy improves.",
@@ -816,8 +934,18 @@ def build(root):
     root = Path(root)
     out = root / "reports"
     out.mkdir(parents=True, exist_ok=True)
+    previous = utils.load_json(out / "summary.json", {})
+    archive = root / "cpu-analysis-v1" / "reports"
+    if previous and previous.get("analysis_revision", 1) < 2 and not archive.exists():
+        shutil.copytree(out, archive)
+    analysis_source = root / "execution" / "analysis-v2" / "build_reports.py"
+    analysis_source.parent.mkdir(parents=True, exist_ok=True)
+    if Path(__file__).resolve() != analysis_source.resolve():
+        shutil.copy2(Path(__file__), analysis_source)
     summary, records, times, control = analyze(root)
     utils.save_json(out / "summary.json", summary)
+    utils.save_json(out / "exploratory-seed-diagnostics.json", summary["exploratory_seed_diagnostics"])
+    write_csv(out / "exploratory-seed-comparisons.csv", summary["exploratory_seed_diagnostics"]["pairs"])
     write_csv(out / "all-epoch-observations.csv", records)
     write_csv(out / "endpoints-by-seed.csv", [r for r in records if r["is_endpoint"]])
     write_csv(out / "run-timing.csv", times)
