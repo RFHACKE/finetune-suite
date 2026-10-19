@@ -28,6 +28,12 @@ L40S workers. Its operational ceiling is **$4**, below the approved $8 ceiling.
 Conservative aggregate resource accounting, worker timeouts and no automatic
 paid retries bound the work. Spending less than the ceiling is expected.
 
+The completed cohort contains all **12 runs and 72 observations**, with no
+failed or deferred runs. Training finished in about **10 minutes**. The worker
+runtime resource estimate is **$0.992**; the observed account-meter increase
+through initial reporting/collection was about **$1.30**, including startup
+overhead and the continuing original download. It is below the $4 ceiling.
+
 ## Interpretation
 
 The primary metric is full validation negative log-likelihood (NLL), with
@@ -49,6 +55,19 @@ epoch 3 in the original three-epoch schedule. These curves reveal learning and
 possible overfitting within six-epoch trajectories. They do not directly compare
 independently optimized epoch budgets or prove the original three-epoch policy
 optimal. The project's global epoch default is unchanged.
+
+The observed lowest mean validation NLL occurs at epoch **1** for Llama-1B,
+Qwen-1.5B and Granite-2B, and epoch **3** for Qwen-3B. Highest mean validation
+accuracy occurs at epoch **6** for Llama, Granite and Qwen-3B, and epoch **5**
+for Qwen-1.5B. Thus, the data does not establish epoch 3 as universally best.
+Mean NLL and accuracy move in different directions, so both must be considered.
+
+CPU analysis revision 2 adds explicitly **exploratory** adjacent-epoch changes
+and an analysis of the same validation examples misclassified at both epochs
+3 and 6. These persistent-error confidence/NLL changes help explain worsening
+probability loss despite improving accuracy. They do not alter the predeclared
+comparisons, hypothesis verdict, training protocol or raw data. JSON and CSV
+include the diagnostics and the matched example positions.
 
 ## Commands
 

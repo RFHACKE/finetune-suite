@@ -166,5 +166,12 @@ def test_generated_documents_open_and_preserve_contrary_findings(tmp_path):
     assert "not supported" in body
     assert "not 72 independent replications" in body
     slides = Presentation(tmp_path / "reports/epoch-study.pptx")
-    assert len(slides.slides) == 16
-    assert len(document.inline_shapes) == 8
+    assert len(slides.slides) == 18
+    assert len(document.inline_shapes) == 9
+    diagnostics = json.loads((tmp_path / "reports/exploratory-diagnostics.json").read_text())
+    for data in diagnostics["models"].values():
+        values = data["persistent_error_aggregates"]
+        assert values["persistent_error_count"]["mean"] == 88
+        assert values["nll_change"]["mean"] == 0
+        assert values["confidence_change_pp"]["mean"] == 0
+        assert next(row["epoch"] for row in data["adjacent_epochs"] if row["mean_pattern"]) == 5

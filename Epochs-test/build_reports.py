@@ -276,6 +276,118 @@ def fmt(stat, scale=1, digits=3):
     return f"{stat['mean'] * scale:.{digits}f} ± {stat['sd'] * scale:.{digits}f}"
 
 
+def exploratory_diagnostics(root, summary, records):
+    """Post-training explanation; leaves all predeclared comparisons unchanged."""
+    models = {}
+    for model in MODELS:
+        rows = [r for r in records if r["model"] == model]
+        adjacent = []
+        for epoch in range(2, 7):
+            previous = {r["seed"]: r for r in rows if r["epoch"] == epoch - 1}
+            pairs = [r for r in rows if r["epoch"] == epoch and r["seed"] in previous]
+            if not pairs:
+                continue
+            train = [r["train_nll"] - previous[r["seed"]]["train_nll"] for r in pairs]
+            valid = [r["validation_nll"] - previous[r["seed"]]["validation_nll"] for r in pairs]
+            adjacent.append(
+                {
+                    "epoch": epoch,
+                    "reference": epoch - 1,
+                    "train_nll_change": mean_sd(train),
+                    "validation_nll_change": mean_sd(valid),
+                    "direction_seeds": sum(t < 0 and v > 0 for t, v in zip(train, valid)),
+                    "n_pairs": len(pairs),
+                    "mean_pattern": bool(np.mean(train) < 0 and np.mean(valid) > 0),
+                }
+            )
+        persistent = []
+        for seed in SEEDS:
+            case = next((r for r in rows if r["seed"] == seed), None)
+            if case is None:
+                continue
+            run_root = root / "models" / model / "runs" / case["run_id"]
+            result = json.loads((run_root / "result.json").read_text())
+            observations = {r["epoch"]: r for r in read_rows(run_root / result["epoch_metrics"])}
+            arrays = {}
+            for epoch in (3, 6):
+                with np.load(
+                    run_root / observations[epoch]["validation"]["predictions"], allow_pickle=False
+                ) as f:
+                    arrays[epoch] = {
+                        k: f[k].copy() for k in ("labels", "predictions", "probabilities", "example_nll")
+                    }
+            before, after = arrays[3], arrays[6]
+            if not np.array_equal(before["labels"], after["labels"]):
+                raise ValueError("Persistent-error analysis requires identical validation example order")
+            old_wrong = before["predictions"] != before["labels"]
+            new_wrong = after["predictions"] != after["labels"]
+            mask = old_wrong & new_wrong
+            entry = {
+                "seed": seed,
+                "persistent_error_count": int(mask.sum()),
+                "positions": np.flatnonzero(mask).tolist(),
+                "corrected_errors": int((old_wrong & ~new_wrong).sum()),
+                "new_errors": int((~old_wrong & new_wrong).sum()),
+            }
+            if mask.any():
+                entry.update(
+                    {
+                        "confidence_at3": float(before["probabilities"].max(axis=1)[mask].mean()),
+                        "confidence_at6": float(after["probabilities"].max(axis=1)[mask].mean()),
+                        "nll_change": float(
+                            (after["example_nll"][mask] - before["example_nll"][mask]).mean()
+                        ),
+                    }
+                )
+                entry["confidence_change_pp"] = 100 * (entry["confidence_at6"] - entry["confidence_at3"])
+            persistent.append(entry)
+        aggregates = {
+            key: mean_sd([r[key] for r in persistent if key in r])
+            for key in (
+                "persistent_error_count",
+                "corrected_errors",
+                "new_errors",
+                "confidence_at3",
+                "confidence_at6",
+                "nll_change",
+                "confidence_change_pp",
+            )
+            if any(key in r for r in persistent)
+        }
+        models[model] = {
+            "adjacent_epochs": adjacent,
+            "persistent_errors_epoch3_to6": persistent,
+            "persistent_error_aggregates": aggregates,
+        }
+    return {
+        "status": "exploratory_post_training",
+        "primary_comparisons_unchanged": True,
+        "caveat": "Descriptive diagnostics added during CPU analysis. The persistent-error set is fixed within each seed (wrong at both epochs3 and6), but differs between seeds. No exact onset or causal mechanism is proved.",
+        "models": models,
+    }
+
+
+def diagnostic_statement(model, summary):
+    d = summary["exploratory_diagnostics"]["models"][model]
+    first = next((r for r in d["adjacent_epochs"] if r["mean_pattern"]), None)
+    if first:
+        onset = (
+            f"The first adjacent mean overfitting pattern appears at epoch {first['epoch']} versus {first['reference']}: "
+            f"train NLL {first['train_nll_change']['mean']:+.4f}, validation NLL {first['validation_nll_change']['mean']:+.4f}; "
+            f"the direction occurs in {first['direction_seeds']}/{first['n_pairs']} seeds."
+        )
+    else:
+        onset = "No adjacent mean overfitting pattern was observed."
+    p = d["persistent_error_aggregates"]
+    if "nll_change" in p:
+        onset += (
+            f" For validation examples wrong at both epochs 3 and 6, mean predicted-class confidence changes "
+            f"from {p['confidence_at3']['mean'] * 100:.2f}% to {p['confidence_at6']['mean'] * 100:.2f}%; "
+            f"their NLL changes by {p['nll_change']['mean']:+.3f} (mean of seed-level means)."
+        )
+    return onset
+
+
 def figures(root, summary, records):
     import matplotlib
 
@@ -411,6 +523,29 @@ def figures(root, summary, records):
     for ax in axes:
         ax.legend(fontsize=8)
     finish(fig, "calibration-and-learning-rate")
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    for ax, metric, title in (
+        (axes[0], "confidence_change_pp", "Confidence on persistent wrong predictions (pp)"),
+        (axes[1], "nll_change", "NLL on the same persistent errors"),
+    ):
+        for i, model in enumerate(MODELS):
+            group = summary["exploratory_diagnostics"]["models"][model]["persistent_error_aggregates"]
+            if metric in group:
+                value = group[metric]
+                ax.bar(i, value["mean"], yerr=value["sd"], capsize=4, color=colors[i], alpha=0.85)
+                ax.annotate(
+                    f"{value['mean']:+.2f}",
+                    (i, value["mean"]),
+                    xytext=(0, 5 if value["mean"] >= 0 else -14),
+                    textcoords="offset points",
+                    ha="center",
+                    fontsize=9,
+                )
+        ax.axhline(0, color="gray", lw=1)
+        ax.set_xticks(range(4), ["Llama\n1B", "Qwen\n1.5B", "Granite\n2B", "Qwen\n3B"])
+        ax.set_ylabel(title)
+    fig.suptitle("Exploratory: epoch 6 − epoch 3, examples wrong at both epochs; mean ± seed SD")
+    finish(fig, "persistent-errors")
     return paths
 
 
@@ -504,10 +639,24 @@ def word_report(root, summary, control, paths):
             doc.add_paragraph(
                 f"Epoch {pair['epoch']} versus 3: train NLL {fmt(pair['train_nll_change'])}; validation NLL {fmt(pair['validation_nll_change'])}; accuracy {fmt(pair['accuracy_change_pp'], digits=2)} percentage points. Overfitting direction: {pair['overfitting_direction_seeds']}/{pair['n_pairs']} seeds. Consistent descriptive pattern: {'yes' if pair['consistent_descriptive_pattern'] else 'no'}."
             )
+        doc.add_heading("Exploratory interpretation of the trajectory", 2)
+        doc.add_paragraph(diagnostic_statement(model, summary))
+        doc.add_paragraph(
+            "These adjacent-epoch diagnostics describe the observed curves; they do not establish an exact onset, and temporary optimization instability can also worsen loss. They do not replace the predeclared comparisons with epoch 3."
+        )
     doc.add_heading("Confidence and the learning-rate path", 1)
     doc.add_picture(str(paths["calibration-and-learning-rate"]), width=Inches(6.7))
     doc.add_paragraph(
         "Brier score measures probability error. The LR chart records actual mean step learning rates, showing the continuing six-epoch schedule. The seed-level CSV also retains wrong-prediction counts and mean confidence on wrong predictions."
+    )
+    doc.add_heading("Why accuracy and loss can move in different directions", 2)
+    doc.add_picture(str(paths["persistent-errors"]), width=Inches(6.7))
+    doc.add_paragraph(
+        "The exploratory chart tracks a fixed set within each seed: validation examples misclassified at both epochs 3 and 6. It measures confidence and NLL changes on those same examples, avoiding changes caused solely by a changing population of mistakes. Positive bars indicate more confident or more costly persistent mistakes. Other examples can become correct at the same time, so overall accuracy can improve while average NLL worsens. This is evidence about prediction behavior, not proof of an internal memorization mechanism. The cohort differs between seeds; plotted values are means of seed-level means."
+    )
+    at6 = [p for data in summary["models"].values() for p in data["comparisons_to_epoch3"] if p["epoch"] == 6]
+    doc.add_paragraph(
+        f"At epoch 6 versus 3, a mean overfitting pattern occurs in {sum(p['mean_overfitting_pattern'] for p in at6)}/4 models, while mean accuracy improves in {sum(p['accuracy_change_pp']['mean'] > 0 for p in at6)}/4. The stricter three-seed consistency rule is met in {sum(p['consistent_descriptive_pattern'] for p in at6)}/4. A mean trend and agreement across all seeds are distinct findings."
     )
     doc.add_heading("Limitations and conclusion", 1)
     doc.add_paragraph(verdict(summary))
@@ -617,6 +766,16 @@ def presentation(root, summary, paths):
         note="Best means lowest observed mean NLL or highest observed accuracy among these six epochs.",
     )
     slide(
+        "Why accuracy can improve while NLL worsens",
+        chart=paths["persistent-errors"],
+        note="Exploratory: same validation examples wrong at both epochs 3 and 6, fixed within each seed. Positive bars mean more confident/costly persistent errors.",
+    )
+    slide(
+        "Interpreting the loss–accuracy tradeoff",
+        "• Correcting some mistakes can raise accuracy.\n• Greater confidence on remaining mistakes can still increase NLL.\n• The new chart tracks the same persistent errors within each seed.\n• Adjacent-epoch changes are exploratory, not proof of an exact overfitting onset.\n• Mean trends do not guarantee agreement across all three seeds.",
+        note="Primary comparisons and the epoch-3 hypothesis assessment remain unchanged.",
+    )
+    slide(
         "Conclusion and limits",
         verdict(summary)
         + "\n\n• SST-2 only, fixed small training subset, three seeds, one rank.\n• Previously inspected validation data; no untouched test-set claim.\n• A six-epoch trajectory does not prove the original three-epoch schedule optimal.\n• Original rank-sweep data and defaults remain unchanged.",
@@ -647,7 +806,51 @@ def build(root):
     root = Path(root)
     (root / "reports").mkdir(parents=True, exist_ok=True)
     summary, records, run_times, control = analyze(root)
+    summary["analysis_revision"] = 2
+    summary["exploratory_diagnostics"] = exploratory_diagnostics(root, summary, records)
     utils.save_json(root / "reports" / "summary.json", summary)
+    utils.save_json(root / "reports" / "exploratory-diagnostics.json", summary["exploratory_diagnostics"])
+    diagnostics = summary["exploratory_diagnostics"]["models"]
+    write_csv(
+        root / "reports" / "persistent-errors.csv",
+        [
+            {
+                "model": model,
+                **{
+                    key: row.get(key)
+                    for key in (
+                        "seed",
+                        "persistent_error_count",
+                        "corrected_errors",
+                        "new_errors",
+                        "confidence_at3",
+                        "confidence_at6",
+                        "confidence_change_pp",
+                        "nll_change",
+                    )
+                },
+            }
+            for model, data in diagnostics.items()
+            for row in data["persistent_errors_epoch3_to6"]
+        ],
+    )
+    write_csv(
+        root / "reports" / "adjacent-epoch-changes.csv",
+        [
+            {
+                "model": model,
+                "epoch": row["epoch"],
+                "reference": row["reference"],
+                "train_nll_change": row["train_nll_change"]["mean"],
+                "validation_nll_change": row["validation_nll_change"]["mean"],
+                "direction_seeds": row["direction_seeds"],
+                "n_pairs": row["n_pairs"],
+                "mean_pattern": row["mean_pattern"],
+            }
+            for model, data in diagnostics.items()
+            for row in data["adjacent_epochs"]
+        ],
+    )
     write_csv(root / "reports" / "epoch-metrics.csv", records)
     write_csv(root / "reports" / "run-times.csv", run_times)
     comparisons = [
