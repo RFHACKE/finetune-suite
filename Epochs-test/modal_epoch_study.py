@@ -1,4 +1,4 @@
-"""Explicit budgeted launch/retrieval for twelve continuous six-epoch fits.
+"""Budgeted launch/retrieval for 48 independent epoch-budget fits.
 
 Launch with `modal run --detach Epochs-test/modal_epoch_study.py --stage start`.
 All training requires an explicit positive --budget. Other stages are CPU only.
@@ -19,18 +19,18 @@ import traceback
 
 import modal
 
-from tools.modal_experiments import ROOT, cache, copy_delta, hf_secret, image as base_image, outputs, save
+from tools.modal_experiments import ROOT, cache, hf_secret, image as base_image, outputs, save
 
 HERE = ROOT / "Epochs-test"
 sys.path.insert(0, str(HERE))
 from epoch_study import MODELS, expected_grid, protocol  # noqa: E402
 
-RUN = os.environ.get("FYP_EPOCH_RUN", "epochs-20261019")
+RUN = os.environ.get("FYP_EPOCH_RUN", "epochs-independent-20261019")
 if not RUN.replace("-", "").replace("_", "").isalnum():
     raise ValueError("FYP_EPOCH_RUN must be a single safe directory name")
 RATE = 3600 * (0.000542 + 2 * 0.0000131 + 16 * 0.00000222)
 LOCAL = HERE / "execution"
-app = modal.App("fyp-epoch-trajectory-study", include_source=False)
+app = modal.App("fyp-epoch-independent-study", include_source=False)
 image = base_image.uv_pip_install("python-docx==1.2.0", "python-pptx==1.0.2").env(
     {"PYTHONPATH": "/app:/app/tools:/app/Epochs-test", "FYP_EPOCH_RUN": RUN}
 )
@@ -44,6 +44,26 @@ for name in (
     image = image.add_local_file(HERE / name, "/app/Epochs-test/" + name, copy=True)
 
 
+def copy_delta(source, destination):
+    """Publish complete files atomically to concurrent Volume readers."""
+    source, destination = Path(source), Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+    for path in source.rglob("*"):
+        if not path.is_file() or path.name.endswith((".lock", ".tmp")):
+            continue
+        target = destination / path.relative_to(source)
+        if (
+            target.exists()
+            and target.stat().st_size == path.stat().st_size
+            and target.stat().st_mtime_ns == path.stat().st_mtime_ns
+        ):
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(target.name + ".tmp")
+        shutil.copy2(path, temporary)
+        os.replace(temporary, target)
+
+
 @app.function(
     image=image,
     secrets=[hf_secret()],
@@ -54,6 +74,7 @@ for name in (
     timeout=10800,
     max_containers=4,
     single_use_containers=True,
+    scaledown_window=2,
     retries=0,
 )
 def train(model, scope, seconds, retry_failed=False):
@@ -177,7 +198,8 @@ def coordinate(scope, budget, seconds):
         "run": RUN,
         "scope": scope,
         "approved_additional_usd": budget,
-        "gpu_resource_ceiling_usd": budget - 0.20,
+        "gpu_resource_ceiling_usd": budget - 0.60,
+        "reserved_startup_cpu_delivery_usd": 0.60,
         "rate_ceiling_usd_per_worker_hour": RATE,
         "calls": {key: call.object_id for key, call in calls.items()},
         "started_unix": time.time(),
@@ -201,7 +223,7 @@ def coordinate(scope, budget, seconds):
                 finish[model] = time.monotonic()
         now = time.monotonic()
         conservative = sum((finish.get(model, now) - started) * RATE / 3600 for model in calls)
-        if conservative >= budget - 0.30:
+        if conservative >= budget - 0.60:
             for model, call in calls.items():
                 if model not in returned:
                     call.cancel(terminate_containers=True)
@@ -276,7 +298,7 @@ def snapshot(make_archive=False):
                 if (
                     path.is_file()
                     and path != delivery
-                    and not path.name.endswith(".lock")
+                    and not path.name.endswith((".lock", ".tmp"))
                     and "__pycache__" not in path.parts
                 ):
                     archive.add(path, arcname=str(path.relative_to(root)))
@@ -339,7 +361,7 @@ def collect():
         LOCAL / "collection.json",
         {"run": RUN, "archive": result["archive"], "completed_unix": time.time(), "output": str(target)},
     )
-    for filename in ("epoch-study.docx", "epoch-study.pptx"):
+    for filename in ("epoch-study.docx", "epoch-study.pptx", "epoch-comparison.docx"):
         source = target / "reports" / filename
         if source.exists():
             shutil.copy2(source, HERE / filename)

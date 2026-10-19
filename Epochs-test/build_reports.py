@@ -1,39 +1,49 @@
-"""Generate evidence-driven charts, a Word report and PowerPoint on CPU."""
+"""Validate independent epoch-budget evidence; generate CPU charts, Word and PPTX."""
 
 from __future__ import annotations
 
 import argparse
 import csv
 from datetime import datetime, timezone
+import hashlib
 import json
+import math
 from pathlib import Path
 
 import numpy as np
 
+from epoch_study import EPOCH_BUDGETS, MODELS, SEEDS, STEPS_PER_EPOCH, expected_grid
 from rank_suite import config, utils
 from rank_suite.protocol import digest
-from epoch_study import MODELS, SEEDS, OBSERVED_EPOCHS
 
 HERE = Path(__file__).resolve().parent
 REFERENCES = [
     (
-        "Hu et al. (2021/2022). LoRA: Low-Rank Adaptation of Large Language Models.",
+        "Hu et al. LoRA: Low-Rank Adaptation of Large Language Models (2021/2022)",
         "https://arxiv.org/abs/2106.09685",
     ),
+    ("Wang et al. GLUE (2018/2019)", "https://arxiv.org/abs/1804.07461"),
     (
-        "Wang et al. (2018/2019). GLUE: A Multi-Task Benchmark and Analysis Platform for Natural Language Understanding.",
-        "https://arxiv.org/abs/1804.07461",
-    ),
-    (
-        "Dodge et al. (2020). Fine-Tuning Pretrained Language Models: Weight Initializations, Data Orders, and Early Stopping.",
+        "Dodge et al. Fine-Tuning Pretrained Language Models: Weight Initializations, Data Orders, and Early Stopping (2020)",
         "https://arxiv.org/abs/2002.06305",
     ),
-    ("Prechelt (1998). Early Stopping—But When?", "https://doi.org/10.1007/3-540-49430-8_3"),
+    ("Prechelt. Early Stopping—But When? (1998)", "https://doi.org/10.1007/3-540-49430-8_3"),
     (
-        "Hugging Face. Cosine schedule with warmup.",
+        "Hugging Face. Cosine schedule with warmup",
         "https://huggingface.co/docs/transformers/main/en/main_classes/optimizer_schedules#transformers.get_cosine_schedule_with_warmup",
     ),
 ]
+METRICS = (
+    "train_nll",
+    "validation_nll",
+    "train_accuracy",
+    "validation_accuracy",
+    "nll_gap",
+    "accuracy_gap",
+    "validation_brier",
+    "validation_wrong_confidence",
+    "mean_adapter_lr",
+)
 
 
 def mean_sd(values):
@@ -50,33 +60,51 @@ def read_rows(path):
     return [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
 
 
+def scheduled_lr(index, budget, peak):
+    """Actual LR used at zero-based optimizer step, before scheduler.step()."""
+    total = STEPS_PER_EPOCH * budget
+    warmup = math.ceil(config.WARMUP_FRAC * total)
+    factor = (
+        index / warmup
+        if index < warmup
+        else 0.5 * (1 + math.cos(math.pi * (index - warmup) / (total - warmup)))
+    )
+    return peak * factor
+
+
 def prediction_metrics(path, expected, count):
     with np.load(path, allow_pickle=False) as f:
-        labels, pred, prob, nll = (
-            f[key] for key in ("labels", "predictions", "probabilities", "example_nll")
-        )
+        labels, pred, prob, nll = (f[k] for k in ("labels", "predictions", "probabilities", "example_nll"))
     if (
-        len(labels) != count
-        or len(pred) != count
+        labels.shape != (count,)
+        or pred.shape != (count,)
+        or nll.shape != (count,)
         or prob.shape != (count, 2)
-        or len(nll) != count
+        or not np.isin(labels, [0, 1]).all()
         or not np.isfinite(prob).all()
         or not np.isfinite(nll).all()
+        or (prob < 0).any()
+        or (prob > 1).any()
+        or (nll < 0).any()
         or not np.allclose(prob.sum(axis=1), 1, atol=1e-5)
         or not np.array_equal(pred, prob.argmax(axis=1))
     ):
         raise ValueError(f"Invalid prediction arrays: {path}")
+    correct_prob = prob[np.arange(count), labels]
+    # FP32 softmax can underflow for a confident wrong answer; CE stays finite.
+    stable = correct_prob > np.finfo(np.float32).tiny
     if (
-        abs(float(nll.mean()) - expected["nll"]) > 1e-5
+        abs(float(nll.mean()) - expected["nll"]) > 2e-5
         or abs(float((labels == pred).mean()) - expected["accuracy"]) > 1e-12
-        or not np.allclose(-np.log(np.maximum(prob[np.arange(count), labels], 1e-38)), nll, atol=1e-5)
+        or not np.allclose(-np.log(correct_prob[stable]), nll[stable], atol=2e-5)
     ):
         raise ValueError(f"Prediction/metric mismatch: {path}")
     wrong = labels != pred
     return {
         "brier": float(np.square(prob - np.eye(2)[labels]).sum(axis=1).mean()),
-        "wrong_confidence": float(prob.max(axis=1)[wrong].mean()) if wrong.any() else None,
+        "wrong_confidence": float(prob.max(axis=1)[wrong].mean()) if wrong.any() else 0.0,
         "wrong_count": int(wrong.sum()),
+        "labels_sha256": hashlib.sha256(labels.astype(np.int64).tobytes()).hexdigest(),
     }
 
 
@@ -84,8 +112,11 @@ def analyze(root):
     root = Path(root)
     control = json.loads((root / "protocol.json").read_text())
     grid = json.loads((root / "expected_grid.json").read_text())
+    if control.get("schema") != "independent-epoch-budget-study-v1" or grid != expected_grid("sst2"):
+        raise ValueError("Expected the separate, prespecified 48-run independent-budget cohort")
     sha = digest(control)
-    records, missing, failures, rejected, run_times = [], [], [], [], []
+    records, times, missing, failures, rejected = [], [], [], [], []
+    paired_initializations, label_checksums = {}, {}
     for identity in grid:
         run_root = root / "models" / identity["model"] / "runs" / identity["run_id"]
         path = run_root / "result.json"
@@ -101,76 +132,98 @@ def analyze(root):
         try:
             if result.get("protocol_sha256") != sha or any(result.get(k) != v for k, v in identity.items()):
                 raise ValueError("Identity/protocol mismatch")
+            budget = identity["epoch_budget"]
             observations = read_rows(run_root / result["epoch_metrics"])
-            if [r["epoch"] for r in observations] != list(OBSERVED_EPOCHS):
-                raise ValueError("Expected exactly six ordered epoch observations")
+            if [r["epoch"] for r in observations] != list(range(1, budget + 1)):
+                raise ValueError("Missing, duplicate or out-of-order within-fit epoch observations")
+            initial = result["initialization"]
+            if result["final_adapter_sha256"] == initial["adapter_sha256"]:
+                raise ValueError("Adapter parameters never changed")
+            pair_key = (identity["model"], identity["seed"])
+            if pair_key in paired_initializations and initial != paired_initializations[pair_key]:
+                raise ValueError("Budgets did not start with matching adapter/head initialization")
+            paired_initializations[pair_key] = initial
+            steps = read_rows(run_root / result["attempt"] / "train_steps.jsonl")
+            total = STEPS_PER_EPOCH * budget
+            if len(steps) != total or [s["step"] for s in steps] != list(range(1, total + 1)):
+                raise ValueError("Training did not record all planned optimizer steps")
+            for index, s in enumerate(steps):
+                if (
+                    s["epoch"] != index // STEPS_PER_EPOCH + 1
+                    or s["task"] != "sst2"
+                    or s["examples"] != (10 if index % STEPS_PER_EPOCH == 155 else 16)
+                    or not np.isfinite([s["loss"], s["grad_norm"], s["lr"], s["head_lr"]]).all()
+                    or not math.isclose(
+                        s["lr"], scheduled_lr(index, budget, identity["lr"]), rel_tol=1e-8, abs_tol=1e-14
+                    )
+                    or not math.isclose(
+                        s["head_lr"], s["lr"] * identity["head_lr_multiplier"], rel_tol=1e-8, abs_tol=1e-14
+                    )
+                ):
+                    raise ValueError("Invalid optimizer steps or budget-matched schedule")
             local = []
-            step_rows = read_rows(run_root / result["attempt"] / "train_steps.jsonl")
-            if len(step_rows) != 936 or [r["step"] for r in step_rows] != list(range(1, 937)):
-                raise ValueError("Training did not record the planned 936 optimizer steps")
             for row in observations:
-                if row["run_id"] != identity["run_id"] or row["task"] != "sst2":
-                    raise ValueError("Observation identity/task mismatch")
+                if (
+                    any(row.get(k) != v for k, v in identity.items())
+                    or row["task"] != "sst2"
+                    or row["step"] != row["epoch"] * STEPS_PER_EPOCH
+                ):
+                    raise ValueError("Observation identity/task/step mismatch")
                 flat = {
-                    "run_id": identity["run_id"],
-                    "model": identity["model"],
-                    "seed": identity["seed"],
+                    **identity,
                     "epoch": row["epoch"],
-                    "rank": identity["rank"],
-                    "lr": identity["lr"],
-                    "head_lr_multiplier": identity["head_lr_multiplier"],
+                    "is_endpoint": row["epoch"] == budget,
                     "online_train_loss": row["online_train_loss"],
                     "nll_gap": row["nll_gap"],
                     "accuracy_gap": row["accuracy_gap"],
                 }
                 for split, count in (("train", 2490), ("validation", 872)):
                     if row[split]["count"] != count:
-                        raise ValueError("Unexpected evaluation count")
+                        raise ValueError("Unexpected full-set evaluation count")
                     extra = prediction_metrics(run_root / row[split]["predictions"], row[split], count)
-                    flat.update({f"{split}_{key}": row[split][key] for key in ("nll", "accuracy", "count")})
-                    flat.update({f"{split}_{key}": value for key, value in extra.items()})
-                steps = [s for s in step_rows if s["epoch"] == row["epoch"]]
-                flat["mean_adapter_lr"] = float(np.mean([s["lr"] for s in steps]))
-                flat["last_adapter_lr"] = steps[-1]["lr"]
+                    labels_sha = extra.pop("labels_sha256")
+                    if split in label_checksums and labels_sha != label_checksums[split]:
+                        raise ValueError("Evaluation example labels/order differ across fits")
+                    label_checksums[split] = labels_sha
+                    flat.update({f"{split}_{k}": row[split][k] for k in ("nll", "accuracy", "count")})
+                    flat.update({f"{split}_{k}": v for k, v in extra.items()})
+                if not math.isclose(
+                    flat["nll_gap"], flat["validation_nll"] - flat["train_nll"], abs_tol=1e-12
+                ) or not math.isclose(
+                    flat["accuracy_gap"], flat["train_accuracy"] - flat["validation_accuracy"], abs_tol=1e-12
+                ):
+                    raise ValueError("Invalid reported generalization gap")
+                epoch_steps = steps[(row["epoch"] - 1) * STEPS_PER_EPOCH : row["epoch"] * STEPS_PER_EPOCH]
+                flat["mean_adapter_lr"] = float(np.mean([s["lr"] for s in epoch_steps]))
+                flat["last_adapter_lr"] = epoch_steps[-1]["lr"]
                 local.append(flat)
             records.extend(local)
-            run_times.append(
+            times.append(
                 {
-                    "run_id": identity["run_id"],
-                    "model": identity["model"],
-                    "seed": identity["seed"],
+                    **identity,
                     "elapsed_s": result["elapsed_s"],
                     "peak_vram_gb": result["peak_vram_gb"],
+                    "optimizer_steps": total,
                 }
             )
-        except (ValueError, KeyError, OSError) as exc:
+        except (ValueError, KeyError, OSError, TypeError) as exc:
             rejected.append({"run_id": identity["run_id"], "reason": str(exc)})
-    complete = len(run_times) == len(grid) and not rejected and not failures
+    endpoints = [r for r in records if r["is_endpoint"]]
     models = {}
-    keys = (
-        "train_nll",
-        "validation_nll",
-        "train_accuracy",
-        "validation_accuracy",
-        "nll_gap",
-        "accuracy_gap",
-        "validation_brier",
-        "mean_adapter_lr",
-    )
     for model in MODELS:
-        selected = [r for r in records if r["model"] == model]
-        epochs = {}
-        for epoch in OBSERVED_EPOCHS:
-            rows = [r for r in selected if r["epoch"] == epoch]
+        selected = [r for r in endpoints if r["model"] == model]
+        budgets = {}
+        for budget in EPOCH_BUDGETS:
+            rows = sorted([r for r in selected if r["epoch_budget"] == budget], key=lambda r: r["seed"])
             if rows:
-                epochs[str(epoch)] = {
+                budgets[str(budget)] = {
                     "seeds": [r["seed"] for r in rows],
-                    **{key: mean_sd([r[key] for r in rows]) for key in keys},
+                    **{k: mean_sd([r[k] for r in rows]) for k in METRICS},
                 }
-        model_complete = len(selected) == len(SEEDS) * 6
-        reference = {r["seed"]: r for r in selected if r["epoch"] == 3}
+        complete = len(selected) == len(SEEDS) * len(EPOCH_BUDGETS)
+        reference = {r["seed"]: r for r in selected if r["epoch_budget"] == 3}
         comparisons = []
-        for epoch in (4, 5, 6):
+        for budget in (4, 5, 6):
             paired = [
                 {
                     "seed": r["seed"],
@@ -180,17 +233,17 @@ def analyze(root):
                     * (r["validation_accuracy"] - reference[r["seed"]]["validation_accuracy"]),
                 }
                 for r in selected
-                if r["epoch"] == epoch and r["seed"] in reference
+                if r["epoch_budget"] == budget and r["seed"] in reference
             ]
             if paired:
                 changes = {
-                    key: mean_sd([r[key] for r in paired])
-                    for key in ("train_nll_change", "validation_nll_change", "accuracy_change_pp")
+                    k: mean_sd([r[k] for r in paired])
+                    for k in ("train_nll_change", "validation_nll_change", "accuracy_change_pp")
                 }
                 count = sum(r["train_nll_change"] < 0 and r["validation_nll_change"] > 0 for r in paired)
                 comparisons.append(
                     {
-                        "epoch": epoch,
+                        "epoch_budget": budget,
                         "reference": 3,
                         "n_pairs": len(paired),
                         **changes,
@@ -198,44 +251,48 @@ def analyze(root):
                         "overfitting_direction_seeds": count,
                         "mean_overfitting_pattern": changes["train_nll_change"]["mean"] < 0
                         and changes["validation_nll_change"]["mean"] > 0,
-                        "consistent_descriptive_pattern": count == len(SEEDS)
+                        "consistent_descriptive_pattern": len(paired) == len(SEEDS)
+                        and count == len(SEEDS)
                         and changes["validation_nll_change"]["mean"] > 0.02,
                     }
                 )
         best_nll = (
-            min(epochs, key=lambda e: (epochs[e]["validation_nll"]["mean"], int(e)))
-            if model_complete
-            else None
+            min(budgets, key=lambda b: (budgets[b]["validation_nll"]["mean"], int(b))) if complete else None
         )
         best_acc = (
-            max(epochs, key=lambda e: (epochs[e]["validation_accuracy"]["mean"], -int(e)))
-            if model_complete
+            max(budgets, key=lambda b: (budgets[b]["validation_accuracy"]["mean"], -int(b)))
+            if complete
             else None
         )
         models[model] = {
-            "complete": model_complete,
-            "epochs": epochs,
-            "best_observed_nll_epoch": int(best_nll) if best_nll else None,
-            "best_observed_accuracy_epoch": int(best_acc) if best_acc else None,
-            "epoch3_lowest_mean_nll": int(best_nll) == 3 if best_nll else None,
-            "comparisons_to_epoch3": comparisons,
+            "complete": complete,
+            "budgets": budgets,
+            "best_observed_nll_budget": int(best_nll) if best_nll else None,
+            "best_observed_accuracy_budget": int(best_acc) if best_acc else None,
+            "budget3_lowest_mean_nll": int(best_nll) == 3 if best_nll else None,
+            "comparisons_to_budget3": comparisons,
         }
+    complete = len(times) == len(grid) and not rejected and not failures
     supported = (
         all(
-            m["epoch3_lowest_mean_nll"]
-            and len(m["comparisons_to_epoch3"]) == 3
-            and all(c["consistent_descriptive_pattern"] for c in m["comparisons_to_epoch3"])
+            m["budget3_lowest_mean_nll"]
+            and len(m["comparisons_to_budget3"]) == 3
+            and all(c["consistent_descriptive_pattern"] for c in m["comparisons_to_budget3"])
             for m in models.values()
         )
         if complete
         else None
     )
     summary = {
-        "schema": "epoch-trajectory-analysis-v1",
+        "schema": "independent-epoch-budget-analysis-v1",
+        "analysis_revision": 1,
+        "analysis_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "complete": complete,
         "expected_runs": len(grid),
-        "completed_runs": len(run_times),
+        "completed_runs": len(times),
         "epoch_observations": len(records),
+        "endpoint_observations": len(endpoints),
+        "optimizer_steps": sum(r["optimizer_steps"] for r in times),
         "scope": control["scope"],
         "protocol_sha256": sha,
         "models": models,
@@ -243,149 +300,35 @@ def analyze(root):
         "failures": failures,
         "rejected": rejected,
         "epoch3_hypothesis_supported_descriptively": supported,
-        "independent_epoch_budget_comparison": False,
+        "independent_epoch_budget_comparison": True,
+        "seeds": list(SEEDS),
+        "paired_initializations_verified": len(paired_initializations),
+        "labels_sha256": label_checksums,
         "created_utc": datetime.now(timezone.utc).isoformat(),
     }
-    return summary, records, run_times, control
+    return summary, records, times, control
 
 
 def verdict(summary):
     if not summary["complete"]:
-        return f"Study incomplete: {summary['completed_runs']}/{summary['expected_runs']} runs passed validation. No overall epoch conclusion is declared."
-    count = sum(m["epoch3_lowest_mean_nll"] for m in summary["models"].values())
+        return f"Study incomplete: {summary['completed_runs']}/{summary['expected_runs']} fits passed validation. No overall epoch-budget conclusion is declared."
+    count = sum(m["budget3_lowest_mean_nll"] for m in summary["models"].values())
     if summary["epoch3_hypothesis_supported_descriptively"]:
-        return "Epoch 3 has the lowest observed mean validation NLL in all four models; epochs 4–6 show consistent descriptive overfitting versus epoch 3. The hypothesis is supported within these six-epoch SST-2 trajectories."
-    return (
-        f"Epoch 3 has the lowest observed mean validation NLL in {count}/4 models. "
-        "The full claim that epoch 3 is best for every model and all later epochs consistently overfit is not supported."
-    )
+        return "Budget 3 has the lowest observed mean validation NLL in all four models; budgets 4–6 meet the predeclared descriptive overfitting rule versus budget 3. This supports the hypothesis in this two-seed SST-2 study, without proving a universal optimum."
+    return f"Budget 3 has the lowest observed mean validation NLL in {count}/4 models. The full claim that three epochs are best for every model and all larger budgets consistently overfit is not supported."
 
 
 def model_statement(model, data):
     if not data["complete"]:
-        return f"{config.MODELS[model].label}: incomplete; no preferred epoch declared."
-    later = [str(c["epoch"]) for c in data["comparisons_to_epoch3"] if c["consistent_descriptive_pattern"]]
-    return (
-        f"{config.MODELS[model].label}: lowest mean NLL at epoch {data['best_observed_nll_epoch']}; "
-        f"highest mean accuracy at epoch {data['best_observed_accuracy_epoch']}. "
-        f"Consistent overfitting versus epoch 3 at: {', '.join(later) or 'none'}."
-    )
+        return f"{config.MODELS[model].label}: incomplete; no preferred budget declared."
+    later = [
+        str(c["epoch_budget"]) for c in data["comparisons_to_budget3"] if c["consistent_descriptive_pattern"]
+    ]
+    return f"{config.MODELS[model].label}: lowest mean NLL at {data['best_observed_nll_budget']} epochs; highest mean accuracy at {data['best_observed_accuracy_budget']}. Consistent loss-overfitting versus budget 3 at: {', '.join(later) or 'none'}."
 
 
 def fmt(stat, scale=1, digits=3):
     return f"{stat['mean'] * scale:.{digits}f} ± {stat['sd'] * scale:.{digits}f}"
-
-
-def exploratory_diagnostics(root, summary, records):
-    """Post-training explanation; leaves all predeclared comparisons unchanged."""
-    models = {}
-    for model in MODELS:
-        rows = [r for r in records if r["model"] == model]
-        adjacent = []
-        for epoch in range(2, 7):
-            previous = {r["seed"]: r for r in rows if r["epoch"] == epoch - 1}
-            pairs = [r for r in rows if r["epoch"] == epoch and r["seed"] in previous]
-            if not pairs:
-                continue
-            train = [r["train_nll"] - previous[r["seed"]]["train_nll"] for r in pairs]
-            valid = [r["validation_nll"] - previous[r["seed"]]["validation_nll"] for r in pairs]
-            adjacent.append(
-                {
-                    "epoch": epoch,
-                    "reference": epoch - 1,
-                    "train_nll_change": mean_sd(train),
-                    "validation_nll_change": mean_sd(valid),
-                    "direction_seeds": sum(t < 0 and v > 0 for t, v in zip(train, valid)),
-                    "n_pairs": len(pairs),
-                    "mean_pattern": bool(np.mean(train) < 0 and np.mean(valid) > 0),
-                }
-            )
-        persistent = []
-        for seed in SEEDS:
-            case = next((r for r in rows if r["seed"] == seed), None)
-            if case is None:
-                continue
-            run_root = root / "models" / model / "runs" / case["run_id"]
-            result = json.loads((run_root / "result.json").read_text())
-            observations = {r["epoch"]: r for r in read_rows(run_root / result["epoch_metrics"])}
-            arrays = {}
-            for epoch in (3, 6):
-                with np.load(
-                    run_root / observations[epoch]["validation"]["predictions"], allow_pickle=False
-                ) as f:
-                    arrays[epoch] = {
-                        k: f[k].copy() for k in ("labels", "predictions", "probabilities", "example_nll")
-                    }
-            before, after = arrays[3], arrays[6]
-            if not np.array_equal(before["labels"], after["labels"]):
-                raise ValueError("Persistent-error analysis requires identical validation example order")
-            old_wrong = before["predictions"] != before["labels"]
-            new_wrong = after["predictions"] != after["labels"]
-            mask = old_wrong & new_wrong
-            entry = {
-                "seed": seed,
-                "persistent_error_count": int(mask.sum()),
-                "positions": np.flatnonzero(mask).tolist(),
-                "corrected_errors": int((old_wrong & ~new_wrong).sum()),
-                "new_errors": int((~old_wrong & new_wrong).sum()),
-            }
-            if mask.any():
-                entry.update(
-                    {
-                        "confidence_at3": float(before["probabilities"].max(axis=1)[mask].mean()),
-                        "confidence_at6": float(after["probabilities"].max(axis=1)[mask].mean()),
-                        "nll_change": float(
-                            (after["example_nll"][mask] - before["example_nll"][mask]).mean()
-                        ),
-                    }
-                )
-                entry["confidence_change_pp"] = 100 * (entry["confidence_at6"] - entry["confidence_at3"])
-            persistent.append(entry)
-        aggregates = {
-            key: mean_sd([r[key] for r in persistent if key in r])
-            for key in (
-                "persistent_error_count",
-                "corrected_errors",
-                "new_errors",
-                "confidence_at3",
-                "confidence_at6",
-                "nll_change",
-                "confidence_change_pp",
-            )
-            if any(key in r for r in persistent)
-        }
-        models[model] = {
-            "adjacent_epochs": adjacent,
-            "persistent_errors_epoch3_to6": persistent,
-            "persistent_error_aggregates": aggregates,
-        }
-    return {
-        "status": "exploratory_post_training",
-        "primary_comparisons_unchanged": True,
-        "caveat": "Descriptive diagnostics added during CPU analysis. The persistent-error set is fixed within each seed (wrong at both epochs3 and6), but differs between seeds. No exact onset or causal mechanism is proved.",
-        "models": models,
-    }
-
-
-def diagnostic_statement(model, summary):
-    d = summary["exploratory_diagnostics"]["models"][model]
-    first = next((r for r in d["adjacent_epochs"] if r["mean_pattern"]), None)
-    if first:
-        onset = (
-            f"The first adjacent mean overfitting pattern appears at epoch {first['epoch']} versus {first['reference']}: "
-            f"train NLL {first['train_nll_change']['mean']:+.4f}, validation NLL {first['validation_nll_change']['mean']:+.4f}; "
-            f"the direction occurs in {first['direction_seeds']}/{first['n_pairs']} seeds."
-        )
-    else:
-        onset = "No adjacent mean overfitting pattern was observed."
-    p = d["persistent_error_aggregates"]
-    if "nll_change" in p:
-        onset += (
-            f" For validation examples wrong at both epochs 3 and 6, mean predicted-class confidence changes "
-            f"from {p['confidence_at3']['mean'] * 100:.2f}% to {p['confidence_at6']['mean'] * 100:.2f}%; "
-            f"their NLL changes by {p['nll_change']['mean']:+.3f} (mean of seed-level means)."
-        )
-    return onset
 
 
 def figures(root, summary, records):
@@ -396,157 +339,220 @@ def figures(root, summary, records):
 
     plt.rcParams.update(
         {
-            "font.size": 11,
+            "font.size": 10,
             "axes.spines.top": False,
             "axes.spines.right": False,
-            "axes.grid": True,
-            "grid.alpha": 0.2,
+            "axes.titleweight": "bold",
             "figure.facecolor": "white",
         }
     )
-    dest = root / "reports" / "figures"
-    dest.mkdir(parents=True, exist_ok=True)
+    out = root / "reports" / "figures"
+    out.mkdir(parents=True, exist_ok=True)
     paths = {}
+    endpoint = [r for r in records if r["is_endpoint"]]
+    blue, orange = "#176B87", "#D76C35"
 
-    def finish(fig, name):
-        fig.tight_layout()
-        for suffix in ("png", "pdf"):
-            fig.savefig(dest / f"{name}.{suffix}", dpi=180, bbox_inches="tight")
+    def save(fig, name):
+        fig.savefig(out / f"{name}.png", dpi=180, bbox_inches="tight")
+        fig.savefig(out / f"{name}.pdf", bbox_inches="tight")
         plt.close(fig)
-        paths[name] = dest / f"{name}.png"
+        paths[name] = out / f"{name}.png"
 
-    def curve(ax, model, key, label, color, scale=1):
-        groups = summary["models"][model]["epochs"]
-        xs = [e for e in OBSERVED_EPOCHS if str(e) in groups]
-        ys = [groups[str(e)][key]["mean"] * scale for e in xs]
-        sd = [groups[str(e)][key]["sd"] * scale for e in xs]
-        ax.errorbar(xs, ys, yerr=sd, marker="o", capsize=4, label=label, color=color, linewidth=2)
-        for si, seed in enumerate(SEEDS):
-            dots = [r for r in records if r["model"] == model and r["seed"] == seed]
-            ax.scatter(
-                [r["epoch"] + (si - 1) * 0.045 for r in dots],
-                [r[key] * scale for r in dots],
-                color=color,
-                s=15,
-                alpha=0.5,
-            )
-        ax.set_xticks(OBSERVED_EPOCHS)
-        ax.axvline(3, color="gray", ls=":", alpha=0.6)
-        ax.set_xlabel("Epoch within continuous six-epoch training")
-
-    fig, axes = plt.subplots(2, 2, figsize=(12, 7))
-    for ax, model in zip(axes.flat, MODELS):
-        curve(ax, model, "validation_nll", "Full validation NLL", "#ce6723")
-        ax.set_title(config.MODELS[model].label)
-        ax.set_ylabel("Validation NLL (lower is better)")
-    fig.suptitle("Validation NLL by epoch: mean ± sample SD; dots = individual seeds", fontsize=14)
-    finish(fig, "validation-overview")
-    fig, axes = plt.subplots(2, 2, figsize=(12, 7))
-    for ax, model in zip(axes.flat, MODELS):
-        curve(ax, model, "validation_accuracy", "Full validation accuracy", "#16778a", 100)
-        ax.set_title(config.MODELS[model].label)
-        ax.set_ylabel("Validation accuracy (%)")
-    finish(fig, "accuracy-overview")
-    for model in MODELS:
-        fig, axes = plt.subplots(2, 2, figsize=(12, 7))
-        for split, label, color in (
-            ("train", "Full train", "#16778a"),
-            ("validation", "Full validation", "#ce6723"),
-        ):
-            curve(axes[0, 0], model, f"{split}_nll", label, color)
-            curve(axes[0, 1], model, f"{split}_accuracy", label, color, 100)
-        axes[0, 0].set_ylabel("NLL")
-        axes[0, 1].set_ylabel("Accuracy (%)")
-        axes[0, 0].legend()
-        axes[0, 1].legend()
-        curve(axes[1, 0], model, "nll_gap", "Validation NLL − train NLL", "#6855a5")
-        axes[1, 0].set_ylabel("NLL generalization gap")
-        axes[1, 0].legend(fontsize=9)
-        pairs = summary["models"][model]["comparisons_to_epoch3"]
-        for key, label, color in (
-            ("train_nll_change", "Train change", "#16778a"),
-            ("validation_nll_change", "Validation change", "#ce6723"),
-        ):
-            axes[1, 1].errorbar(
-                [p["epoch"] for p in pairs],
-                [p[key]["mean"] for p in pairs],
-                yerr=[p[key]["sd"] for p in pairs],
-                marker="o",
-                capsize=4,
+    def curve(ax, rows, key, label, color, scale=1, seed_points=True):
+        budgets = sorted({r["epoch_budget"] for r in rows})
+        groups = [[r[key] * scale for r in rows if r["epoch_budget"] == b] for b in budgets]
+        if groups:
+            ax.errorbar(
+                budgets,
+                [np.mean(g) for g in groups],
+                yerr=[np.std(g, ddof=1) if len(g) > 1 else 0 for g in groups],
                 label=label,
                 color=color,
+                lw=1.8,
+                marker="o",
+                capsize=3,
             )
-        axes[1, 1].axhline(0, color="gray", lw=1)
-        axes[1, 1].set_xticks((4, 5, 6))
-        axes[1, 1].set_xlabel("Later epoch compared with epoch 3")
-        axes[1, 1].set_ylabel("Paired NLL change (mean ± SD)")
-        axes[1, 1].legend(fontsize=9)
-        fig.suptitle(f"{config.MODELS[model].label}: full-set epoch measurements, rank 16", fontsize=14)
-        finish(fig, f"{model}-epochs")
-    matrix = np.full((4, 6), np.nan)
-    for i, model in enumerate(MODELS):
-        groups = summary["models"][model]["epochs"]
-        if "3" in groups:
-            for j, epoch in enumerate(OBSERVED_EPOCHS):
-                if str(epoch) in groups:
-                    matrix[i, j] = (
-                        groups[str(epoch)]["validation_nll"]["mean"] - groups["3"]["validation_nll"]["mean"]
-                    )
-    finite = np.abs(matrix[np.isfinite(matrix)])
-    limit = max(float(finite.max()) if len(finite) else 0.1, 0.01)
-    fig, ax = plt.subplots(figsize=(11, 4))
-    heat = ax.imshow(np.ma.masked_invalid(matrix), cmap="RdBu_r", vmin=-limit, vmax=limit, aspect="auto")
+        if seed_points:
+            for seed, marker, offset in zip(SEEDS, ("o", "D"), (-0.055, 0.055)):
+                selected = sorted([r for r in rows if r["seed"] == seed], key=lambda r: r["epoch_budget"])
+                ax.plot(
+                    [r["epoch_budget"] + offset for r in selected],
+                    [r[key] * scale for r in selected],
+                    color=color,
+                    alpha=0.35,
+                    marker=marker,
+                    ls=":",
+                    lw=0.8,
+                    ms=4,
+                )
+        ax.set_xticks(EPOCH_BUDGETS)
+        ax.set_xlabel("Planned epoch budget (fresh fit)")
+        ax.axvline(3, color="#89949A", ls=":", lw=1)
+        ax.grid(alpha=0.18)
+
+    for key, name, title, scale in (
+        ("validation_nll", "validation-overview", "Endpoint validation NLL (lower is better)", 1),
+        ("validation_accuracy", "accuracy-overview", "Endpoint validation accuracy (%)", 100),
+    ):
+        fig, axes = plt.subplots(2, 2, figsize=(11.2, 6.8), layout="constrained")
+        for ax, model in zip(axes.flat, MODELS):
+            rows = [r for r in endpoint if r["model"] == model]
+            curve(ax, rows, key, "Mean ± SD", blue, scale)
+            ax.set_title(config.MODELS[model].label)
+            ax.set_ylabel("NLL" if scale == 1 else "Accuracy (%)")
+        fig.suptitle(title + "\nTwo seeds; faint dotted lines show individual paired seeds", fontsize=13)
+        save(fig, name)
+
+    for model in MODELS:
+        rows = [r for r in endpoint if r["model"] == model]
+        fig, axes = plt.subplots(2, 2, figsize=(11, 6.8), layout="constrained")
+        ax = axes[0, 0]
+        curve(ax, rows, "train_nll", "Train NLL", blue)
+        curve(ax, rows, "validation_nll", "Validation NLL", orange)
+        ax.set_ylabel("Full-set NLL")
+        ax.legend(fontsize=8)
+        ax = axes[0, 1]
+        curve(ax, rows, "train_accuracy", "Train", blue, 100)
+        curve(ax, rows, "validation_accuracy", "Validation", orange, 100)
+        ax.set_ylabel("Accuracy (%)")
+        ax.legend(fontsize=8)
+        ax = axes[1, 0]
+        curve(ax, rows, "nll_gap", "Validation − train", orange)
+        ax.set_ylabel("NLL generalization gap")
+        ax.axhline(0, color="grey", lw=0.7)
+        ax = axes[1, 1]
+        comps = summary["models"][model]["comparisons_to_budget3"]
+        for key, label, color, offset in (
+            ("train_nll_change", "Train", blue, -0.07),
+            ("validation_nll_change", "Validation", orange, 0.07),
+        ):
+            ax.errorbar(
+                [c["epoch_budget"] + offset for c in comps],
+                [c[key]["mean"] for c in comps],
+                yerr=[c[key]["sd"] for c in comps],
+                color=color,
+                label=label,
+                marker="o",
+                capsize=3,
+            )
+        ax.axhline(0, color="grey", lw=0.8)
+        ax.set_xticks([4, 5, 6])
+        ax.set_xlabel("Epoch budget, compared with budget 3")
+        ax.set_ylabel("Paired endpoint NLL change")
+        ax.legend(fontsize=8)
+        ax.grid(alpha=0.18)
+        fig.suptitle(
+            config.MODELS[model].label + " | independent budget comparison; mean ± sample SD", fontsize=13
+        )
+        save(fig, model + "-budgets")
+
+        fig, axes = plt.subplots(2, 3, figsize=(11.2, 7), layout="constrained")
+        for ax, budget in zip(axes.flat, EPOCH_BUDGETS):
+            selected = [r for r in records if r["model"] == model and r["epoch_budget"] == budget]
+            for split, label, color in (("train", "Train", blue), ("validation", "Validation", orange)):
+                epochs = sorted({r["epoch"] for r in selected})
+                groups = [[r[f"{split}_nll"] for r in selected if r["epoch"] == e] for e in epochs]
+                if groups:
+                    means = np.array([np.mean(g) for g in groups])
+                    sd = np.array([np.std(g, ddof=1) if len(g) > 1 else 0 for g in groups])
+                    ax.plot(epochs, means, color=color, marker="o", ms=3, label=label)
+                    ax.fill_between(epochs, np.maximum(0, means - sd), means + sd, color=color, alpha=0.12)
+            ax.set_title(f"Planned budget: {budget} epoch{'s' if budget > 1 else ''}")
+            ax.set_xticks(range(1, budget + 1))
+            ax.set_xlim(0.8, max(1.2, budget + 0.2))
+            ax.set_xlabel("Observed epoch within this fit")
+            ax.set_ylabel("Full-set NLL")
+            ax.grid(alpha=0.18)
+            if budget == 1:
+                ax.legend(fontsize=8)
+        fig.suptitle(
+            config.MODELS[model].label
+            + " | within-fit loss curves\nEach panel has a fresh, budget-matched schedule; shading = SD across two seeds",
+            fontsize=13,
+        )
+        save(fig, model + "-learning-curves")
+
+    matrix = np.full((4, 3), np.nan)
+    for index, model in enumerate(MODELS):
+        for comp in summary["models"][model]["comparisons_to_budget3"]:
+            matrix[index, comp["epoch_budget"] - 4] = comp["validation_nll_change"]["mean"]
+    fig, ax = plt.subplots(figsize=(9.5, 4.5), layout="constrained")
+    limit = max(0.02, float(np.nanmax(np.abs(matrix)))) if np.isfinite(matrix).any() else 0.02
+    im = ax.imshow(matrix, cmap="RdBu_r", vmin=-limit, vmax=limit, aspect="auto")
+    ax.set_xticks(range(3), ["4 epochs", "5 epochs", "6 epochs"])
     ax.set_yticks(range(4), [config.MODELS[m].label for m in MODELS])
-    ax.set_xticks(range(6), OBSERVED_EPOCHS)
-    ax.set_xlabel("Observed epoch in six-epoch fits")
-    for (i, j), v in np.ndenumerate(matrix):
-        if np.isfinite(v):
+    for i in range(4):
+        for j in range(3):
             ax.text(
                 j,
                 i,
-                f"{v:+.3f}",
+                f"{matrix[i, j]:+.3f}" if np.isfinite(matrix[i, j]) else "missing",
                 ha="center",
                 va="center",
-                color="white" if abs(v) > 0.6 * limit else "black",
+                fontsize=12,
+                color="white" if abs(matrix[i, j]) > limit * 0.65 else "black",
             )
-    ax.grid(False)
-    ax.set_title("Validation NLL change versus epoch 3 (negative = better; positive = worse)")
-    fig.colorbar(heat, ax=ax, label="NLL change")
-    finish(fig, "comparison-to-epoch3")
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
-    colors = ("#16778a", "#ce6723", "#6855a5", "#70832b")
-    for model, color in zip(MODELS, colors):
-        curve(axes[0], model, "validation_brier", config.MODELS[model].label, color)
-        curve(axes[1], model, "mean_adapter_lr", config.MODELS[model].label, color)
-    axes[0].set_ylabel("Validation Brier score (lower is better)")
-    axes[1].set_ylabel("Mean adapter learning rate within epoch")
-    for ax in axes:
-        ax.legend(fontsize=8)
-    finish(fig, "calibration-and-learning-rate")
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
-    for ax, metric, title in (
-        (axes[0], "confidence_change_pp", "Confidence on persistent wrong predictions (pp)"),
-        (axes[1], "nll_change", "NLL on the same persistent errors"),
-    ):
-        for i, model in enumerate(MODELS):
-            group = summary["exploratory_diagnostics"]["models"][model]["persistent_error_aggregates"]
-            if metric in group:
-                value = group[metric]
-                ax.bar(i, value["mean"], yerr=value["sd"], capsize=4, color=colors[i], alpha=0.85)
-                ax.annotate(
-                    f"{value['mean']:+.2f}",
-                    (i, value["mean"]),
-                    xytext=(0, 5 if value["mean"] >= 0 else -14),
-                    textcoords="offset points",
-                    ha="center",
-                    fontsize=9,
-                )
-        ax.axhline(0, color="gray", lw=1)
-        ax.set_xticks(range(4), ["Llama\n1B", "Qwen\n1.5B", "Granite\n2B", "Qwen\n3B"])
-        ax.set_ylabel(title)
-    fig.suptitle("Exploratory: epoch 6 − epoch 3, examples wrong at both epochs; mean ± seed SD")
-    finish(fig, "persistent-errors")
+    fig.colorbar(im, ax=ax, label="Mean validation NLL change versus budget 3")
+    ax.set_title(
+        "Endpoint validation loss change relative to 3 epochs\nNegative/blue = lower NLL; positive/red = higher NLL"
+    )
+    save(fig, "comparison-to-budget3")
+
+    fig, axes = plt.subplots(2, 2, figsize=(11.2, 6.8), layout="constrained")
+    for ax, model in zip(axes.flat, MODELS):
+        curve(ax, [r for r in endpoint if r["model"] == model], "validation_brier", "Brier", blue)
+        ax.set_title(config.MODELS[model].label)
+        ax.set_ylabel("Brier score (0–2; lower is better)")
+    fig.suptitle("Endpoint probability quality | Brier score; mean ± sample SD", fontsize=13)
+    save(fig, "brier-overview")
+
+    fig, ax = plt.subplots(figsize=(10.5, 4.7), layout="constrained")
+    for budget in EPOCH_BUDGETS:
+        steps = np.arange(STEPS_PER_EPOCH * budget)
+        ax.plot(
+            (steps + 1) / STEPS_PER_EPOCH,
+            [scheduled_lr(int(s), budget, 1) for s in steps],
+            label=f"{budget} epochs",
+        )
+    ax.set_xlabel("Training progress (epochs)")
+    ax.set_ylabel("Adapter LR / selected peak LR")
+    ax.set_title("Each independent budget has its own warmup and cosine horizon")
+    ax.legend(ncol=3)
+    ax.grid(alpha=0.2)
+    save(fig, "budget-matched-schedules")
     return paths
+
+
+def add_table(doc, headers, rows):
+    table = doc.add_table(rows=1, cols=len(headers))
+    table.style = "Light Shading Accent 1"
+    for cell, value in zip(table.rows[0].cells, headers):
+        cell.text = str(value)
+    for row in rows:
+        for cell, value in zip(table.add_row().cells, row):
+            cell.text = str(value)
+    return table
+
+
+def model_table(doc, data):
+    add_table(
+        doc,
+        ("Epoch budget", "Train NLL", "Validation NLL", "Validation acc. (%)", "NLL gap"),
+        [
+            (
+                b,
+                fmt(g["train_nll"]),
+                fmt(g["validation_nll"]),
+                fmt(g["validation_accuracy"], 100, 2),
+                fmt(g["nll_gap"]),
+            )
+            for b, g in data["budgets"].items()
+        ],
+    )
+    doc.add_paragraph(
+        "Final measurements of separate fresh fits; mean ± sample SD over seeds 42 and 123. Lower NLL and higher accuracy are better.",
+        "Caption",
+    )
 
 
 def word_report(root, summary, control, paths):
@@ -559,237 +565,241 @@ def word_report(root, summary, control, paths):
     section.left_margin = section.right_margin = Inches(0.7)
     doc.styles["Normal"].font.name = "Calibri"
     doc.styles["Normal"].font.size = Pt(10.5)
-    for name in ("Title", "Heading 1", "Heading 2"):
-        doc.styles[name].font.color.rgb = RGBColor.from_string("15384D")
-    doc.add_heading("Epochs, generalization and overfitting", 0)
-    doc.add_paragraph("SST-2 · LoRA rank 16 · four models · three seeds", "Subtitle")
+    for style in ("Title", "Heading 1", "Heading 2"):
+        doc.styles[style].font.color.rgb = RGBColor.from_string("15384D")
+    doc.add_heading("Independent epoch budgets and overfitting", 0)
+    doc.add_paragraph("SST-2 · LoRA rank 16 · four fixed models · two seeds · budgets 1–6", "Subtitle")
     doc.add_paragraph(
-        f"Generated {summary['created_utc']}\n{summary['completed_runs']}/{summary['expected_runs']} complete runs; {summary['epoch_observations']} epoch observations\nProtocol SHA-256: {summary['protocol_sha256']}"
+        f"Generated {summary['created_utc']}\n{summary['completed_runs']}/48 completed and validated fits; {summary['endpoint_observations']} endpoints; {summary['epoch_observations']} within-fit epoch observations.\nProtocol SHA-256: {summary['protocol_sha256']}"
     )
     doc.add_heading("Findings", 1)
     doc.add_paragraph(verdict(summary))
     for model, result in summary["models"].items():
         doc.add_paragraph(model_statement(model, result))
-    doc.add_heading("Question and design", 1)
+    doc.add_heading("Research question and independent-run design", 1)
     doc.add_paragraph(
-        "We test whether validation performance is best at epoch 3 and worsens at epochs 4–6. This is a hypothesis, not an assumed result. Each of four pinned pretrained models is fine-tuned once per seed (42, 123, 456), continuously for six epochs: 12 runs and 72 epoch observations. After every epoch, all 2,490 fixed training examples and all 872 official SST-2 validation examples are evaluated. No early stopping, adaptive tuning, checkpoint selection, or discarded seeds are used."
+        "We test the hypothesis that three epochs provide the best validation performance and larger budgets cause overfitting. The outcome is not predetermined. Four pinned pretrained models [1] are each trained for six independently planned budgets (1, 2, 3, 4, 5, 6 epochs), with seeds 42 and 123: 48 fresh fits. Every fit starts from the pinned base weights with a fresh LoRA adapter, classification heads, AdamW optimizer, cosine scheduler and shuffle generator. Initialization checksums match across budgets within each model/seed. There is no warm-starting from an earlier fit, early stopping, adaptive tuning, seed removal, or best-checkpoint selection."
     )
-    table = doc.add_table(rows=1, cols=3)
-    table.style = "Light Shading Accent 1"
-    for c, t in zip(table.rows[0].cells, ("Model", "Adapter LR", "Head LR multiplier")):
-        c.text = t
-    for model in MODELS:
-        for c, t in zip(
-            table.add_row().cells,
+    doc.add_paragraph(
+        "Each fit uses the same 2,490 fixed SST-2 training examples and 872 official validation examples [2]. After every epoch we evaluate the entire training and validation sets with dropout disabled and save probabilities, labels and per-example NLL. Observations preserve Torch CPU/CUDA RNG state. Only the final epoch of each fit enters the budget comparison: 48 endpoint measurements. The 168 within-fit epoch observations are learning-curve measurements, not 168 independent replications. Two shared seeds are paired blocks, not enough replications for strong significance claims [3]."
+    )
+    add_table(
+        doc,
+        ("Model", "Adapter peak LR", "Head multiplier", "Head peak LR"),
+        [
             (
-                config.MODELS[model].label,
-                f"{control['learning_rates'][model]:.3g}",
-                f"{control['head_lr_multipliers'][model]:g}",
-            ),
-        ):
-            c.text = t
-    doc.add_paragraph(
-        "Fixed controls: q/v LoRA rank 16, alpha 32; AdamW, FP32 trainable parameters and moments, BF16 compute; effective/micro batch 16; evaluation batch 32; maximum length 256; weight decay 0; dropout 0; clipping 1; 3% warmup then cosine decay. These LR/head policies were best among the project's earlier tested candidates [1]. The dataset and all model revisions are pinned [2]."
-    )
-    doc.add_heading("Interpretation and schedule limitation", 2)
-    doc.add_paragraph(
-        "Negative log-likelihood (NLL) measures the mean negative log probability assigned to the correct label; lower is better. Overfitting is suggested when training NLL falls while validation NLL rises [4]. A larger gap alone is insufficient. Accuracy can remain stable even as wrong predictions become more confident; Brier score and per-example probabilities provide additional context. Brier score here is the mean sum of squared probability errors across both classes (range 0–2)."
+                config.MODELS[m].label,
+                f"{control['learning_rates'][m]:.3g}",
+                f"{control['head_lr_multipliers'][m]:g}×",
+                f"{control['learning_rates'][m] * control['head_lr_multipliers'][m]:.3g}",
+            )
+            for m in MODELS
+        ],
     )
     doc.add_paragraph(
-        "The same optimizer and six-epoch cosine schedule continue across observations. Epoch 3 here therefore differs from epoch 3 of the original three-epoch schedule, which decays faster [5]. This study describes learning trajectories and possible stopping points under the six-epoch schedule. It does not establish the best independent epoch budget or prove the original three-epoch policy optimal."
+        "Selected learning rates are the best among the project's earlier tested candidates; they are held fixed here, not claimed to be globally optimal. Other controls: q/v LoRA rank 16, alpha 32, BF16 compute with FP32 trainable parameters and AdamW moments; effective/micro batch 16, eval batch 32, length 256, weight decay 0, dropout 0, gradient clipping 1. Dataset/model revisions, data indices, optimizer defaults and environment are retained in protocol.json and model selection/environment files."
+    )
+    doc.add_heading("Why the schedule is matched to each budget", 2)
+    doc.add_paragraph(
+        "Each epoch has 156 optimizer steps. A budget of E epochs therefore has 156E steps, ceil(0.03 × 156E) warmup steps and cosine decay toward zero over its own horizon [5]. The six budgets use 5, 10, 15, 19, 24 and 29 warmup steps respectively. This compares practical duration-plus-schedule policies: it does not isolate duration while holding the entire learning-rate path constant. It addresses the main limitation of interpreting epoch 3 from a single six-epoch schedule as a completed three-epoch fit. Intermediate observations from different horizons are never pooled."
+    )
+    doc.add_picture(str(paths["budget-matched-schedules"]), width=Inches(6.7))
+    doc.add_heading("Metrics and the predeclared overfitting rule", 2)
+    doc.add_paragraph(
+        "NLL (negative log-likelihood) is the mean −log probability assigned to the correct label; lower is better. Training NLL is measured on the full training set after updates, rather than using the online batch loss as a generalization comparison. A fall in training NLL with a rise in validation NLL is consistent with loss-based overfitting [4]. A larger train–validation gap alone is insufficient, and optimization instability can also worsen validation loss. Accuracy measures correctness; NLL additionally penalizes confident mistakes, so the two can prefer different budgets. Brier score is the mean sum of squared probability errors over both classes (range 0–2)."
     )
     doc.add_paragraph(
-        "All observations restore RNG state and never change training. Means and sample standard deviations are computed over the three seeds; error bars are SD, not confidence intervals. Individual seeds are also shown. Comparisons at epochs 4–6 are paired with epoch 3 within each seed. The predeclared consistency label requires falling train NLL and rising validation NLL in all three paired seeds plus mean validation NLL rise >0.02. This is a descriptive rule, not a significance test. Seed variability motivates retaining every replication [3]."
+        "The primary endpoint is mean validation NLL; accuracy, training NLL, gaps, Brier score and wrong-answer confidence are secondary. Budgets 4–6 are paired with budget 3 using the same seed. The descriptive consistency screen requires lower endpoint training NLL and higher validation NLL in BOTH paired seeds, with a mean validation NLL rise above 0.02. This 0.02 threshold is a predeclared practical screening choice, not a literature-derived significance threshold. All seed values and mean ± sample SD are reported; SD is not a confidence interval. Two seeds and reused validation data do not prove an optimal epoch or exact overfitting onset."
     )
-    for name, caption in (
-        ("validation-overview", "Full validation NLL: mean ± sample SD, with individual seeds."),
-        ("accuracy-overview", "Full validation accuracy across epochs."),
-        ("comparison-to-epoch3", "NLL changes relative to epoch 3. Blue = better; red = worse."),
+    for key, caption in (
+        (
+            "validation-overview",
+            "Final full-validation NLL of independent fits: means, sample SD and individual paired seeds.",
+        ),
+        (
+            "accuracy-overview",
+            "Final validation accuracy, shown separately because probability loss and correctness can disagree.",
+        ),
+        (
+            "comparison-to-budget3",
+            "Mean endpoint validation NLL change versus the independently completed three-epoch fits.",
+        ),
     ):
-        doc.add_picture(str(paths[name]), width=Inches(6.7))
+        doc.add_picture(str(paths[key]), width=Inches(6.7))
         doc.add_paragraph(caption, "Caption")
     for model, result in summary["models"].items():
         doc.add_page_break()
         doc.add_heading(config.MODELS[model].label, 1)
         doc.add_paragraph(model_statement(model, result))
-        table = doc.add_table(rows=1, cols=5)
-        table.style = "Light Shading Accent 1"
-        for c, t in zip(
-            table.rows[0].cells, ("Epoch", "Train NLL", "Validation NLL", "Validation acc. (%)", "NLL gap")
-        ):
-            c.text = t
-        for epoch, group in result["epochs"].items():
-            for c, t in zip(
-                table.add_row().cells,
-                (
-                    epoch,
-                    fmt(group["train_nll"]),
-                    fmt(group["validation_nll"]),
-                    fmt(group["validation_accuracy"], 100, 2),
-                    fmt(group["nll_gap"]),
-                ),
-            ):
-                c.text = t
-        doc.add_paragraph(
-            "Mean ± sample SD across seeds. Each row is observed within continuing six-epoch fits.", "Caption"
-        )
-        doc.add_picture(str(paths[f"{model}-epochs"]), width=Inches(6.7))
-        doc.add_heading("Changes after epoch 3", 2)
-        for pair in result["comparisons_to_epoch3"]:
+        model_table(doc, result)
+        doc.add_picture(str(paths[model + "-budgets"]), width=Inches(6.7))
+        doc.add_heading("Budgets 4–6 compared with budget 3", 2)
+        for comp in result["comparisons_to_budget3"]:
             doc.add_paragraph(
-                f"Epoch {pair['epoch']} versus 3: train NLL {fmt(pair['train_nll_change'])}; validation NLL {fmt(pair['validation_nll_change'])}; accuracy {fmt(pair['accuracy_change_pp'], digits=2)} percentage points. Overfitting direction: {pair['overfitting_direction_seeds']}/{pair['n_pairs']} seeds. Consistent descriptive pattern: {'yes' if pair['consistent_descriptive_pattern'] else 'no'}."
+                f"{comp['epoch_budget']} versus 3 epochs: train NLL change {fmt(comp['train_nll_change'])}; validation NLL change {fmt(comp['validation_nll_change'])}; accuracy change {fmt(comp['accuracy_change_pp'], digits=2)} percentage points. Loss-overfitting direction in {comp['overfitting_direction_seeds']}/{comp['n_pairs']} paired seeds; descriptive screen: {'met' if comp['consistent_descriptive_pattern'] else 'not met'}."
             )
-        doc.add_heading("Exploratory interpretation of the trajectory", 2)
-        doc.add_paragraph(diagnostic_statement(model, summary))
+        doc.add_picture(str(paths[model + "-learning-curves"]), width=Inches(6.7))
         doc.add_paragraph(
-            "These adjacent-epoch diagnostics describe the observed curves; they do not establish an exact onset, and temporary optimization instability can also worsen loss. They do not replace the predeclared comparisons with epoch 3."
+            "Each panel is a separate planned budget. Points show full-set NLL after each epoch, averaged over two fresh fits; shaded bands show sample SD. These curves describe training progress within a schedule and are not additional endpoint replications.",
+            "Caption",
         )
-    doc.add_heading("Confidence and the learning-rate path", 1)
-    doc.add_picture(str(paths["calibration-and-learning-rate"]), width=Inches(6.7))
+    doc.add_heading("Probability quality", 1)
+    doc.add_picture(str(paths["brier-overview"]), width=Inches(6.7))
     doc.add_paragraph(
-        "Brier score measures probability error. The LR chart records actual mean step learning rates, showing the continuing six-epoch schedule. The seed-level CSV also retains wrong-prediction counts and mean confidence on wrong predictions."
+        "The seed-level endpoint CSV also records wrong-prediction counts and mean confidence on wrong predictions. That confidence metric describes a changing set of mistakes and should not by itself be treated as a matched-example causal explanation. All per-example probabilities are retained for further CPU analysis."
     )
-    doc.add_heading("Why accuracy and loss can move in different directions", 2)
-    doc.add_picture(str(paths["persistent-errors"]), width=Inches(6.7))
-    doc.add_paragraph(
-        "The exploratory chart tracks a fixed set within each seed: validation examples misclassified at both epochs 3 and 6. It measures confidence and NLL changes on those same examples, avoiding changes caused solely by a changing population of mistakes. Positive bars indicate more confident or more costly persistent mistakes. Other examples can become correct at the same time, so overall accuracy can improve while average NLL worsens. This is evidence about prediction behavior, not proof of an internal memorization mechanism. The cohort differs between seeds; plotted values are means of seed-level means."
-    )
-    at6 = [p for data in summary["models"].values() for p in data["comparisons_to_epoch3"] if p["epoch"] == 6]
-    doc.add_paragraph(
-        f"At epoch 6 versus 3, a mean overfitting pattern occurs in {sum(p['mean_overfitting_pattern'] for p in at6)}/4 models, while mean accuracy improves in {sum(p['accuracy_change_pp']['mean'] > 0 for p in at6)}/4. The stricter three-seed consistency rule is met in {sum(p['consistent_descriptive_pattern'] for p in at6)}/4. A mean trend and agreement across all seeds are distinct findings."
-    )
-    doc.add_heading("Limitations and conclusion", 1)
+    doc.add_heading("Conclusion, uncertainty and applicability", 1)
     doc.add_paragraph(verdict(summary))
     doc.add_paragraph(
-        "This is an exploratory SST-2 study using a small fixed training subset, three seeds, one rank, and previously selected learning rates. Previously inspected official validation data is reused, so it is not an untouched test-set confirmation. No universal optimum, statistical significance, or optimum for the full RTE → MNLI → SST-2 sequence is claimed. The observations within each run are correlated; 72 observations are not 72 independent replications. Model and metric preferences may differ. Original experiments and global defaults remain separate and unchanged."
+        "These are exploratory comparisons on a small, fixed SST-2 subset, rank 16 and two seeds. The official validation set was inspected in earlier LR/epoch studies and is reused; it is not an untouched test set. The minimum among six means is a descriptive choice subject to selection bias, and small differences should not be overinterpreted. Training a different seed, rank, task or full RTE → MNLI → SST-2 sequence can change the outcome. This study does not establish a universal best duration, retention performance or a causal memorization mechanism. The original suite's three-epoch default and rank-sweep experiments are unchanged."
     )
     if not summary["complete"]:
         doc.add_paragraph(
-            f"Missing runs: {len(summary['missing'])}; failed/incomplete: {len(summary['failures'])}; rejected: {len(summary['rejected'])}. Exact identifiers appear in summary.json. Missing values are not imputed."
+            f"Incomplete evidence: {len(summary['missing'])} missing, {len(summary['failures'])} failed/incomplete and {len(summary['rejected'])} rejected fits. Exact identifiers and reasons are recorded in summary.json; missing values are not imputed."
         )
-    doc.add_heading("Reproducibility and evidence", 1)
+    doc.add_heading("Reproducibility and retained evidence", 1)
     doc.add_paragraph(
-        "JSON/CSV tables, all per-epoch full-set predictions/probabilities/NLL, optimizer-step losses and learning rates, data indices, initialization hashes, pinned source, hardware/software records, and failure logs are retained. Model weights, adapter weights, projection tensors and optimizer states are not exported. Word and PowerPoint derive from the same summary; PNG/PDF charts and CPU-only regeneration code are supplied."
+        "The remote Modal volume and local results retain protocol/grid/source hashes, selected example indices, initialization checksums, per-step losses/learning rates/gradient norms, full train/validation per-epoch predictions, timing/VRAM and failures. CSV/JSON, PNG/PDF figures, this Word report and the PowerPoint are generated from the same validated evidence. No base/adapter model weights, optimizer states or projection tensors are exported. Failed fits require an explicit new training request; CPU report regeneration does not launch GPUs."
     )
     doc.add_heading("References", 1)
-    for i, (title, url) in enumerate(REFERENCES, 1):
-        doc.add_paragraph(f"[{i}] {title}\n{url}")
+    for index, (title, url) in enumerate(REFERENCES, 1):
+        doc.add_paragraph(f"[{index}] {title}\n{url}")
     section.footer.paragraphs[
         0
-    ].text = f"Separate SST-2 epoch study | protocol {summary['protocol_sha256'][:12]}"
+    ].text = f"Independent SST-2 epoch budgets | protocol {summary['protocol_sha256'][:12]}"
     doc.save(root / "reports" / "epoch-study.docx")
+    tables = Document()
+    tables.add_heading("Independent epoch-budget comparison", 0)
+    tables.add_paragraph(verdict(summary))
+    for model, result in summary["models"].items():
+        tables.add_heading(config.MODELS[model].label, 1)
+        model_table(tables, result)
+        tables.add_paragraph(model_statement(model, result))
+    tables.add_paragraph(
+        "48 fresh fits, seeds 42/123, SST-2, rank16. NLL is the primary endpoint. Observed best budgets are descriptive; previously inspected validation data and two seeds limit generalization. See epoch-study.docx for complete methods and figures."
+    )
+    tables.save(root / "reports" / "epoch-comparison.docx")
 
 
-def presentation(root, summary, paths):
+def presentation(root, summary, control, paths):
     from pptx import Presentation
     from pptx.dml.color import RGBColor
     from pptx.util import Inches, Pt
+    from PIL import Image
 
     deck = Presentation()
-    deck.slide_width = Inches(13.333)
-    deck.slide_height = Inches(7.5)
+    deck.slide_width, deck.slide_height = Inches(13.333), Inches(7.5)
 
-    def text(slide, value, x, y, w, h, size=23, bold=False):
-        box = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
-        frame = box.text_frame
+    def text(item, value, x, y, w, h, size=22, bold=False):
+        frame = item.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h)).text_frame
         frame.word_wrap = True
         for i, line in enumerate(value.split("\n")):
             p = frame.paragraphs[0] if i == 0 else frame.add_paragraph()
-            p.text = line
-            p.font.size = Pt(size)
-            p.font.bold = bold
+            p.text, p.font.size, p.font.bold = line, Pt(size), bold
             p.font.color.rgb = RGBColor(21, 56, 77)
-            p.space_after = Pt(12)
+            p.space_after = Pt(10)
 
-    def slide(title, body=None, chart=None, note=""):
+    def slide(title, body=None, chart=None, note="", size=22):
         item = deck.slides.add_slide(deck.slide_layouts[6])
-        text(item, title, 0.55, 0.25, 12.2, 0.7, 29, True)
+        text(item, title, 0.55, 0.23, 12.2, 0.7, 28, True)
         if body:
-            text(item, body, 0.75, 1.3, 11.8, 5.4)
+            text(item, body, 0.75, 1.2, 11.8, 5.3, size)
         if chart:
-            from PIL import Image
-
-            with Image.open(chart) as pic:
-                w, h = pic.size
+            with Image.open(chart) as picture:
+                w, h = picture.size
             scale = min(12.1 / w, 5.55 / h)
             w, h = w * scale, h * scale
             item.shapes.add_picture(
                 str(chart), Inches((13.333 - w) / 2), Inches(1.0), width=Inches(w), height=Inches(h)
             )
-        text(item, note, 0.65, 6.7, 12, 0.48, 12)
-        text(item, f"Epochs-test | SST-2 | {len(deck.slides)}", 0.65, 7.15, 12, 0.2, 9)
+        text(item, note, 0.65, 6.65, 12, 0.55, 11)
+        text(item, f"Epochs-test | independent budgets | SST-2 | {len(deck.slides)}", 0.65, 7.2, 12, 0.2, 9)
 
     slide(
-        "Epochs, generalization and overfitting",
-        f"LoRA rank 16 • four fixed models • three seeds\n12 continuous six-epoch runs, 72 epoch measurements\n\n{verdict(summary)}",
-        note="A test of the epoch-3 hypothesis; conclusions follow the observations.",
+        "Independent epoch budgets and overfitting",
+        f"Four fixed models • LoRA rank 16 • seeds 42 and 123\n48 fresh fits across budgets 1–6\n\n{verdict(summary)}",
+        note=f"Protocol SHA-256: {summary['protocol_sha256'][:20]}",
     )
     slide(
-        "Design: evaluate while training continues",
-        "• Train epoch 1 → evaluate → epoch 2 → evaluate → … → epoch 6.\n• Full 2,490-example training and 872-example validation evaluation each epoch.\n• Four models × seeds 42, 123, 456 = 12 independent runs.\n• Rank 16; selected model-specific learning rates; default training controls.\n• Same optimizer and six-epoch cosine schedule throughout; no early stopping.",
-        note="Epoch measurements within a run are correlated, not independent replications.",
+        "Design: fresh training for every planned duration",
+        "• Four models × six budgets × two seeds = 48 fits.\n• Fresh pinned base, adapter, heads, optimizer and scheduler every time.\n• Same initialization and shuffle seed paired across budgets.\n• Fixed 2,490 SST-2 training and 872 validation examples.\n• Full train/validation evaluation after every epoch; no early stopping.\n• Only final observations compare budgets; 168 observations are correlated.",
+        note="All seeds and failures are retained. Intermediate epochs are learning curves, not extra replications.",
     )
     slide(
-        "What would support overfitting?",
-        "• Training NLL decreases: closer fit to training examples.\n• Validation NLL increases: worse correct-label probabilities on held-out data.\n• Accuracy can stay stable while wrong predictions become more confident.\n• Our descriptive consistency rule requires that pattern in all three seeds and mean validation NLL rise >0.02.\n• Compare epochs 4–6 with epoch 3 within each seed.",
-        note="A widening gap alone is insufficient. The rule is not a statistical significance test.",
+        "Fixed learning rates and training controls",
+        "\n".join(
+            f"• {config.MODELS[m].label}: adapter LR {control['learning_rates'][m]:.3g}; head ×{control['head_lr_multipliers'][m]:g}"
+            for m in MODELS
+        )
+        + "\n\nRank 16; alpha 32; q/v adapters; AdamW; BF16 compute, FP32 trainables/moments; batch 16; length 256; weight decay/dropout 0; clipping 1.",
+        note="Rates were selected by earlier project calibration; no new LR tuning occurs here.",
     )
     slide(
-        "Validation NLL across epochs",
+        "Each fit uses its own cosine schedule",
+        chart=paths["budget-matched-schedules"],
+        note="156 steps/epoch; ceil(3% warmup); compare duration plus its matched schedule, not duration at a fixed LR path.",
+    )
+    slide(
+        "How do we identify loss-based overfitting?",
+        "• NLL = mean −log probability of the correct label; lower is better.\n• Falling full-training NLL + rising validation NLL suggests overfitting.\n• Compare budgets 4–6 with independently completed budget 3.\n• Descriptive screen: this direction in both seeds AND mean NLL rise >0.02.\n• Accuracy and Brier score add context; a larger gap alone is insufficient.\n• Two seeds give descriptive evidence, not a significance test.",
+        note="The hypothesis is tested, not assumed; results can contradict epoch 3 being best.",
+    )
+    slide(
+        "Endpoint validation NLL",
         chart=paths["validation-overview"],
-        note="Lower is better. Error bars = sample SD; dots = seeds; dotted line = epoch-3 reference.",
+        note="Lower is better. Mean ± sample SD across two seeds; faint dotted lines = individual paired seeds.",
     )
     slide(
-        "Validation accuracy across epochs",
+        "Endpoint validation accuracy",
         chart=paths["accuracy-overview"],
-        note="Accuracy and NLL can prefer different epochs; both are reported.",
+        note="Higher is better. Different metrics can prefer different planned budgets.",
     )
     slide(
-        "How much does each epoch differ from epoch 3?",
-        chart=paths["comparison-to-epoch3"],
-        note="Blue/negative = lower NLL; red/positive = higher NLL. Check training loss before calling a change overfitting.",
+        "How much do larger budgets differ from 3 epochs?",
+        chart=paths["comparison-to-budget3"],
+        note="Validation loss change alone does not prove overfitting; inspect training loss and both paired seeds.",
     )
     for model, result in summary["models"].items():
         slide(
-            f"{config.MODELS[model].label}: epoch comparisons",
-            chart=paths[f"{model}-epochs"],
+            config.MODELS[model].label + ": endpoint budgets",
+            chart=paths[model + "-budgets"],
             note=model_statement(model, result),
         )
+        slide(
+            config.MODELS[model].label + ": loss curves",
+            chart=paths[model + "-learning-curves"],
+            note="Each panel is a different fresh planned budget. Full-set train/validation NLL; shaded bands = two-seed SD.",
+        )
     slide(
-        "Probability quality and learning rates",
-        chart=paths["calibration-and-learning-rate"],
-        note="Brier score: lower is better. The observed LR path belongs to the six-epoch schedule.",
+        "Probability quality: Brier score",
+        chart=paths["brier-overview"],
+        note="Lower is better. NLL can rise if remaining mistakes become more confident even while accuracy improves.",
     )
     slide(
-        "Findings by model",
-        "\n".join(model_statement(m, r) for m, r in summary["models"].items()),
-        note="Best means lowest observed mean NLL or highest observed accuracy among these six epochs.",
-    )
-    slide(
-        "Why accuracy can improve while NLL worsens",
-        chart=paths["persistent-errors"],
-        note="Exploratory: same validation examples wrong at both epochs 3 and 6, fixed within each seed. Positive bars mean more confident/costly persistent errors.",
-    )
-    slide(
-        "Interpreting the loss–accuracy tradeoff",
-        "• Correcting some mistakes can raise accuracy.\n• Greater confidence on remaining mistakes can still increase NLL.\n• The new chart tracks the same persistent errors within each seed.\n• Adjacent-epoch changes are exploratory, not proof of an exact overfitting onset.\n• Mean trends do not guarantee agreement across all three seeds.",
-        note="Primary comparisons and the epoch-3 hypothesis assessment remain unchanged.",
+        "Observed preferences by model",
+        "\n\n".join(model_statement(m, result) for m, result in summary["models"].items()),
+        note="Preferences are descriptive minima/maxima among six tested budget means; they are not universal optima.",
+        size=20,
     )
     slide(
         "Conclusion and limits",
         verdict(summary)
-        + "\n\n• SST-2 only, fixed small training subset, three seeds, one rank.\n• Previously inspected validation data; no untouched test-set claim.\n• A six-epoch trajectory does not prove the original three-epoch schedule optimal.\n• Original rank-sweep data and defaults remain unchanged.",
+        + "\n\n• Two seeds; one small SST-2 subset; one rank.\n• Reused validation data, not an untouched test set.\n• Duration and matched schedule vary together.\n• No conclusion about other tasks, ranks or continual retention.\n• Original rank-sweep data and three-epoch defaults are unchanged.",
+        size=21,
     )
     slide(
-        "Evidence retained for later analysis",
-        "• Word report, this presentation, PNG/PDF charts, JSON and CSV.\n• Full-set per-epoch probabilities, labels, NLL, accuracy and gaps.\n• Step-level losses and actual learning rates; seed-level comparisons.\n• Pinned source/data revisions, selected indices and failure records.\n• No large model weights; CPU-only reanalysis is supported.",
+        "Evidence retained for CPU reanalysis",
+        f"• {summary['completed_runs']}/48 fits validated; {summary['epoch_observations']} epoch observations.\n• Word report, table document, this presentation, JSON/CSV, PNG/PDF.\n• Per-example full train/validation probabilities, labels and NLL.\n• Step losses, actual learning rates, gradients, timing and VRAM.\n• Frozen source, pinned revisions, data indices and initialization checksums.\n• Remote persistence and failure logs; no large model-weight exports.",
     )
     slide(
-        "References", "\n".join(f"[{i}] {title}\n{url}" for i, (title, url) in enumerate(REFERENCES[:3], 1))
+        "References",
+        "\n\n".join(f"[{i}] {title}\n{url}" for i, (title, url) in enumerate(REFERENCES[:3], 1)),
+        size=17,
     )
     slide(
         "References (continued)",
-        "\n".join(f"[{i}] {title}\n{url}" for i, (title, url) in enumerate(REFERENCES[3:], 4)),
+        "\n\n".join(f"[{i}] {title}\n{url}" for i, (title, url) in enumerate(REFERENCES[3:], 4)),
+        size=18,
     )
     deck.save(root / "reports" / "epoch-study.pptx")
 
@@ -804,88 +814,62 @@ def write_csv(path, rows):
 
 def build(root):
     root = Path(root)
-    (root / "reports").mkdir(parents=True, exist_ok=True)
-    summary, records, run_times, control = analyze(root)
-    summary["analysis_revision"] = 2
-    summary["exploratory_diagnostics"] = exploratory_diagnostics(root, summary, records)
-    utils.save_json(root / "reports" / "summary.json", summary)
-    utils.save_json(root / "reports" / "exploratory-diagnostics.json", summary["exploratory_diagnostics"])
-    diagnostics = summary["exploratory_diagnostics"]["models"]
+    out = root / "reports"
+    out.mkdir(parents=True, exist_ok=True)
+    summary, records, times, control = analyze(root)
+    utils.save_json(out / "summary.json", summary)
+    write_csv(out / "all-epoch-observations.csv", records)
+    write_csv(out / "endpoints-by-seed.csv", [r for r in records if r["is_endpoint"]])
+    write_csv(out / "run-timing.csv", times)
     write_csv(
-        root / "reports" / "persistent-errors.csv",
+        out / "endpoint-aggregates.csv",
         [
             {
-                "model": model,
-                **{
-                    key: row.get(key)
-                    for key in (
-                        "seed",
-                        "persistent_error_count",
-                        "corrected_errors",
-                        "new_errors",
-                        "confidence_at3",
-                        "confidence_at6",
-                        "confidence_change_pp",
-                        "nll_change",
-                    )
-                },
+                "model": m,
+                "epoch_budget": int(b),
+                "seeds": ";".join(map(str, g["seeds"])),
+                **{f"{k}_{stat}": g[k][stat] for k in METRICS for stat in ("mean", "sd", "n")},
             }
-            for model, data in diagnostics.items()
-            for row in data["persistent_errors_epoch3_to6"]
+            for m, data in summary["models"].items()
+            for b, g in data["budgets"].items()
         ],
     )
     write_csv(
-        root / "reports" / "adjacent-epoch-changes.csv",
+        out / "paired-changes-versus-budget3.csv",
         [
-            {
-                "model": model,
-                "epoch": row["epoch"],
-                "reference": row["reference"],
-                "train_nll_change": row["train_nll_change"]["mean"],
-                "validation_nll_change": row["validation_nll_change"]["mean"],
-                "direction_seeds": row["direction_seeds"],
-                "n_pairs": row["n_pairs"],
-                "mean_pattern": row["mean_pattern"],
-            }
-            for model, data in diagnostics.items()
-            for row in data["adjacent_epochs"]
+            {"model": m, "epoch_budget": c["epoch_budget"], "reference": 3, **r}
+            for m, data in summary["models"].items()
+            for c in data["comparisons_to_budget3"]
+            for r in c["paired_values"]
         ],
     )
-    write_csv(root / "reports" / "epoch-metrics.csv", records)
-    write_csv(root / "reports" / "run-times.csv", run_times)
-    comparisons = [
-        {
-            "model": m,
-            "epoch": p["epoch"],
-            "reference": 3,
-            "n_pairs": p["n_pairs"],
-            "train_nll_change": p["train_nll_change"]["mean"],
-            "validation_nll_change": p["validation_nll_change"]["mean"],
-            "accuracy_change_pp": p["accuracy_change_pp"]["mean"],
-            "overfitting_direction_seeds": p["overfitting_direction_seeds"],
-            "consistent_descriptive_pattern": p["consistent_descriptive_pattern"],
-        }
-        for m, data in summary["models"].items()
-        for p in data["comparisons_to_epoch3"]
-    ]
-    write_csv(root / "reports" / "comparisons-to-epoch3.csv", comparisons)
     paths = figures(root, summary, records)
     word_report(root, summary, control, paths)
-    presentation(root, summary, paths)
-    report = {
+    presentation(root, summary, control, paths)
+    manifest = [
+        {
+            "path": str(p.relative_to(root)),
+            "bytes": p.stat().st_size,
+            "sha256": hashlib.sha256(p.read_bytes()).hexdigest(),
+        }
+        for p in sorted(out.rglob("*"))
+        if p.is_file() and p.name != "artifact-manifest.json"
+    ]
+    utils.save_json(
+        out / "artifact-manifest.json", {"protocol_sha256": summary["protocol_sha256"], "files": manifest}
+    )
+    return {
         "complete": summary["complete"],
         "completed_runs": summary["completed_runs"],
         "expected_runs": summary["expected_runs"],
         "epoch_observations": summary["epoch_observations"],
+        "endpoint_observations": summary["endpoint_observations"],
         "verdict": verdict(summary),
-        "figures": [str(p.relative_to(root)) for p in paths.values()],
-        "documents": ["reports/epoch-study.docx", "reports/epoch-study.pptx"],
     }
-    utils.save_json(root / "reports" / "manifest.json", report)
-    return report
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=HERE / "results")
-    print(json.dumps(build(parser.parse_args().root), indent=2))
+    args = parser.parse_args()
+    print(json.dumps(build(args.root), indent=2))

@@ -1,151 +1,144 @@
-# Separate epoch trajectory study
+# Independent epoch-budget study
 
-The authorized study uses **SST-2**, all four fixed models, LoRA **rank 16**,
-and **three seeds (42, 123, 456)**. There are **12 continuous six-epoch runs**
-and **72 epoch observations**. Each run starts fresh from the pinned pretrained
-model, then trains epoch 1, evaluates, trains epoch 2, evaluates, and continues
-to epoch 6. Optimizer and scheduler state continue across all six epochs.
+This separate exploratory SST-2 study compares **48 fresh fits**:
+**four fixed models × six epoch budgets (1–6) × two seeds (42, 123)**.
+LoRA rank is 16. Each fit starts from the pinned base model, with fresh adapter,
+heads, optimizer, shuffle generator and **budget-matched cosine schedule**.
+Matching initialization hashes are checked across budgets within each seed.
+No fit continues from a shorter-budget fit. Earlier continuous six-epoch
+trajectory results are not reused or mixed into this cohort.
 
-Every observation evaluates **all 2,490 fixed training examples and all 872
-validation examples**. Evaluation restores RNG state and never changes training.
-The original rank sweeps and the running downloader remain separate.
+After every epoch we evaluate the complete **2,490-example fixed training set**
+and **872-example official SST-2 validation set**. This produces **168 epoch
+observations**, **48 endpoints** and **26,208 optimizer steps**. Only endpoints
+enter the budget comparison; intermediate observations supply loss curves.
+Evaluation restores Torch CPU/CUDA RNG state and never changes training.
 
-| Model | Adapter LR | Head LR multiplier |
-|---|---:|---:|
-| Llama-3.2-1B | 0.000400 | 5 |
-| Qwen2.5-1.5B | 0.000185 | 1 |
-| Granite-3.3-2B | 0.000320 | 5 |
-| Qwen2.5-3B | 0.000300 | 5 |
+| Model | Adapter peak LR | Head multiplier | Head peak LR |
+|---|---:|---:|---:|
+| Llama-3.2-1B | 4e-4 | 5 | 2e-3 |
+| Qwen2.5-1.5B | 1.85e-4 | 1 | 1.85e-4 |
+| Granite3.3-2B | 3.2e-4 | 5 | 1.6e-3 |
+| Qwen2.5-3B | 3e-4 | 5 | 1.5e-3 |
 
-These are the best previously tested LR/head policies, not global optima.
-Controls include AdamW, **weight decay 0**, **dropout 0**, effective/micro batch
-16, evaluation batch 32, maximum length 256, BF16 compute, FP32 trainable weights
-and Adam moments, q/v adapters, alpha 32, clipping 1, and 3% warmup followed by
-cosine decay to zero over six epochs (936 optimizer steps per run).
+These are the project's previously selected rates, held fixed here. Other
+controls: q/v adapters, alpha32, AdamW/FP32 moments and trainables, BF16 compute,
+batch/microbatch16, eval batch32, max length256, weight decay0, dropout0,
+clip1. Dataset/model revisions, data selection and original SST-2 task-head
+seed position are preserved. There are 156 updates per epoch. Warmup is
+ceil(3% of planned steps): **5/10/15/19/24/29 steps** for budgets1–6, followed
+by cosine decay over each fit's horizon. This compares duration plus its matched
+schedule, rather than duration with a fixed learning-rate path.
 
-The smaller study is expected to cost approximately **$1.50–3** on four parallel
-L40S workers. Its operational ceiling is **$4**, below the approved $8 ceiling.
-Conservative aggregate resource accounting, worker timeouts and no automatic
-paid retries bound the work. Spending less than the ceiling is expected.
+The primary endpoint is mean validation NLL. Accuracy, full-training NLL,
+generalization gaps, Brier score, wrong-prediction counts/confidence and
+individual seed results are retained. Budgets4–6 are paired with budget3.
+The predeclared descriptive overfitting screen requires falling train NLL and
+rising validation NLL in **both seeds**, plus mean validation NLL rise >0.02.
+That practical threshold is a project screening choice, not a significance
+test. The hypothesis that three epochs are best is evaluated, never imposed.
+No early stopping, adaptive tuning, checkpoint selection or seed removal occurs.
 
-The completed cohort contains all **12 runs and 72 observations**, with no
-failed or deferred runs. Training finished in about **10 minutes**. The worker
-runtime resource estimate is **$0.992**; the observed account-meter increase
-through initial reporting/collection was about **$1.30**, including startup
-overhead and the continuing original download. It is below the $4 ceiling.
+Two seeds give limited descriptive evidence. SD bars are not confidence
+intervals. Previously inspected validation data is reused, so this is not an
+untouched test-set confirmation. Results apply to this SST-2 subset/rank and do
+not establish optimal epochs for other tasks, ranks or continual retention.
+The original three-epoch suite default and original result download are separate.
 
-## Interpretation
+## Execution and cost
 
-The primary metric is full validation negative log-likelihood (NLL), with
-accuracy, training NLL, generalization gaps, Brier score, and confidence on wrong
-predictions retained. Epochs 4–6 are compared with epoch 3 within each seed.
-A descriptive overfitting pattern requires falling training NLL and rising
-validation NLL. A consistency label requires this direction in all three seeds
-and a mean validation NLL rise over 0.02. This is not a significance test.
-Plots show individual seeds, means and sample SD (not confidence intervals).
+The measured forecast is roughly **$3–$4 / 35–50 minutes**, with an operational
+**$5 additional ceiling**, four parallel L40S workers and no automatic paid
+retries. A conservative resource-time guard reserves $0.60 for startup and CPU
+analysis/delivery and cancels remaining workers if its estimate reaches $4.40.
+This is an application guard, not a provider-enforced invoice cap; billing can
+lag and includes startup/cleanup time. The existing download's account allowance
+is preserved separately. Actual receipts/timing are saved under `execution/`.
 
-The study tests whether epoch 3 is best; it must report contrary results.
-No epochs or seeds are discarded to support a desired conclusion. Observations
-within a run are correlated, not independent replications. Previously inspected
-official validation data is reused; this is not an untouched test-set estimate.
-One task, one rank and three seeds do not establish a universal optimum.
-
-**Schedule caveat:** epoch 3 inside the six-epoch cosine schedule differs from
-epoch 3 in the original three-epoch schedule. These curves reveal learning and
-possible overfitting within six-epoch trajectories. They do not directly compare
-independently optimized epoch budgets or prove the original three-epoch policy
-optimal. The project's global epoch default is unchanged.
-
-The observed lowest mean validation NLL occurs at epoch **1** for Llama-1B,
-Qwen-1.5B and Granite-2B, and epoch **3** for Qwen-3B. Highest mean validation
-accuracy occurs at epoch **6** for Llama, Granite and Qwen-3B, and epoch **5**
-for Qwen-1.5B. Thus, the data does not establish epoch 3 as universally best.
-Mean NLL and accuracy move in different directions, so both must be considered.
-
-CPU analysis revision 2 adds explicitly **exploratory** adjacent-epoch changes
-and an analysis of the same validation examples misclassified at both epochs
-3 and 6. These persistent-error confidence/NLL changes help explain worsening
-probability loss despite improving accuracy. They do not alter the predeclared
-comparisons, hypothesis verdict, training protocol or raw data. JSON and CSV
-include the diagnostics and the matched example positions.
-
-## Commands
-
-Use the existing configured Modal CLI/account and `hf.env`. Models and data are
-pinned and read from the existing shared cache. Tokens enter the container as an
-ephemeral secret; no credential file is copied into an image or result archive.
+Use the existing Modal CLI/account and ignored `hf.env`. The token enters cloud
+workers as an ephemeral secret, never as an image/archive file. Cached pinned
+models/data are shared with earlier runs.
 
 ```bash
-# CPU-only protocol/grid preparation; no cloud call.
+# CPU-only preparation: no network, no GPU launch.
 PYTHONPATH=. .venv/bin/python Epochs-test/epoch_study.py \
   --protocol-only --scope sst2 --output Epochs-test/execution/plan
 
-# Paid training: launch only once, with authorized spending.
+# Paid launch ONCE, with authorized spending.
 modal run --detach Epochs-test/modal_epoch_study.py \
-  --stage start --scope sst2 --budget 4 --seconds 3600
+  --stage start --scope sst2 --budget 5 --seconds 3600
 
-# CPU-only remote status, collection, or report regeneration.
+# CPU-only status, collection or report regeneration.
 modal run Epochs-test/modal_epoch_study.py --stage status
 modal run Epochs-test/modal_epoch_study.py --stage collect
 modal run Epochs-test/modal_epoch_study.py --stage report
 
-# CPU-only local report regeneration after collection.
+# Local CPU reanalysis after retrieval.
 .venv/bin/python -m pip install -r Epochs-test/requirements-report.txt
 PYTHONPATH=. .venv/bin/python Epochs-test/build_reports.py --root Epochs-test/results
 ```
 
 | Script | Option | Meaning/default |
 |---|---|---|
-| `epoch_study.py` | `--scope {sst2}` | Fixed study scope, default `sst2` |
-| | `--model KEY` | One of the four fixed keys; required for direct GPU training |
-| | `--output PATH` | Model result root or protocol-only directory; default `Epochs-test/results` |
-| | `--seconds N` | Worker time allowance; default 3000 |
-| | `--protocol-only` | Write protocol and 12-run grid without training/network |
-| | `--retry-failed` | Explicitly retry failed/incomplete runs from pretrained weights; preserve prior attempts |
+| `epoch_study.py` | `--scope {sst2}` | Fixed study task; default `sst2` |
+| | `--model KEY` | One fixed model key; required for direct CUDA training |
+| | `--output PATH` | Model result root or plan directory; default `Epochs-test/results` |
+| | `--seconds N` | Worker allowance; default3000; stop before deadline and preserve evidence |
+| | `--protocol-only` | Write protocol and 48-run grid without network/training |
+| | `--retry-failed` | Explicit new fresh fit for a failed/incomplete attempt; preserve old attempts; not used automatically |
 | `modal_epoch_study.py` | `--stage {start,status,collect,report}` | Default `status`; only `start` launches GPUs |
-| | `--scope {sst2}` | Fixed study scope |
-| | `--budget USD` | Explicit authorized additional ceiling for `start`; default 0 prevents accidental launches |
-| | `--seconds N` | Hard timeout per worker; default 3600; aggregate budget may stop workers sooner |
-| `build_reports.py` | `--root PATH` | Retrieved cohort root; default `Epochs-test/results` |
-| `watch_results.py` | `--poll-seconds N` | Check the existing coordinator every 60 seconds by default (minimum 10) |
-| | `--timeout-seconds N` | Default 10800; after this deadline collect available evidence, without starting training |
-| All | `--help` | CLI help |
+| | `--scope {sst2}` | Fixed authorized scope |
+| | `--budget USD` | Explicit additional ceiling for launch; default0 blocks training; valid1–20 |
+| | `--seconds N` | Per-worker timeout; default3600; valid300–10800; aggregate guard may stop earlier |
+| `build_reports.py` | `--root PATH` | Cohort root; default `Epochs-test/results` |
+| `watch_results.py` | `--poll-seconds N` | Wait for coordinator, default60, minimum10 |
+| | `--timeout-seconds N` | Default10800, minimum60; then collect committed evidence without training |
+| All | `--help` | Show CLI help |
 
-`FYP_EPOCH_RUN` optionally names a different remote cohort; default is
-`epochs-20261019`. Local/remote launch receipts prevent accidental duplicates.
-A new cohort still requires authorized spending.
+`FYP_EPOCH_RUN` optionally selects a different remote cohort. Default:
+**`epochs-independent-20261019`**, deliberately different from the prior
+continuous study. Local/remote receipts prevent accidental duplicate launches.
 
-## Stored evidence
+## Durable evidence and deliverables
 
-Remote results persist in Modal Volume `fyp-finetune-results` under
-`epochs-20261019/`. Observations, logs, completed runs, failed attempts and source
-provenance are committed after each epoch and run. A detached coordinator keeps
-training and CPU report generation alive without the local client. No automatic
-GPU retries occur. Incomplete runs can later be restarted explicitly from the
-pretrained model; no training checkpoints are saved for within-run recovery.
+Remote data persists on Modal Volume **`fyp-finetune-results`**, under
+**`epochs-independent-20261019/`**. Atomic incremental copies and volume commits
+publish logs, predictions and failures after every epoch and run. The detached
+coordinator runs CPU analysis after all workers return. Failures are explicit,
+with run identifiers and tracebacks; there are no automatic GPU retries.
+No weight checkpoints are saved, so a failed fit requires restarting that fit
+from the base model when explicitly authorized.
 
-Local results live in `Epochs-test/results` and operational receipts in
-`Epochs-test/execution`. Final **`epoch-study.docx`** and **`epoch-study.pptx`**
-are copied here after retrieval. JSON/CSV, PNG/PDF figures and all per-epoch
-labels, probabilities and example NLL are retained for CPU analysis.
-Model weights, adapter weights, optimizer states and projection tensors are
-never exported. Generated results/documents are ignored by Git; source code
-and this protocol description are versioned independently.
+Local evidence is collected into `Epochs-test/results/`, with operational
+receipts in `Epochs-test/execution/`. Generated deliverables are:
 
-The local `fyp-epoch-results.service` waits for this existing cloud coordinator
-and retrieves the small archive automatically, independently of Codex or the
-terminal. Its timestamped log is `execution/collection-progress.log`; CLI output
-is in `execution/collection-cli.log`. CPU-only collection can retry up to three
-times; this service never launches or retries GPU training. If it is stopped,
-the remote evidence remains available through `--stage collect`. Inspect it with
-`systemctl status fyp-epoch-results.service`. The original downloader runs in its
-own separate service.
+- **`epoch-study.docx`**: full methods, endpoint tables, graphs and interpretation.
+- **`epoch-study.pptx`**: presentation of design, comparisons, curves and limits.
+- **`epoch-comparison.docx`**: concise per-model endpoint tables.
+- JSON/CSV endpoint/paired/within-fit data, PNG/PDF figures and artifact hashes.
+- Full-set per-example probabilities/labels/NLL, step losses/LRs/gradients,
+  source/data/hardware/environment records, initialization hashes and failures.
 
-## Research sources
+Model weights, adapter weights, optimizer states and projection tensors are not
+exported. Results and documents are ignored by Git; reproducible source is tracked.
+
+The `fyp-epoch-independent-results.service` collector can retrieve results without
+Codex or a terminal. It polls the existing coordinator, then performs CPU-only
+collection (up to three delivery attempts). It never starts or retries GPU fits.
+Its timestamped progress is in `execution/collection-progress.log`, with CLI
+output in `execution/collection-cli.log`. Inspect with:
+
+```bash
+systemctl status fyp-epoch-independent-results.service
+```
+
+The original downloader has its own service and remains running independently.
+
+## Primary sources
 
 - Hu et al., LoRA: https://arxiv.org/abs/2106.09685
 - Wang et al., GLUE: https://arxiv.org/abs/1804.07461
-- Dodge et al., initialization, data order and early stopping: https://arxiv.org/abs/2002.06305
+- Dodge et al., initialization/data order/early stopping: https://arxiv.org/abs/2002.06305
 - Prechelt, Early Stopping—But When?: https://doi.org/10.1007/3-540-49430-8_3
-- Cosine schedule parameters: https://huggingface.co/docs/transformers/main/en/main_classes/optimizer_schedules#transformers.get_cosine_schedule_with_warmup
-- Modal resource pricing, checked 2026-10-19: https://modal.com/pricing
+- Cosine schedule: https://huggingface.co/docs/transformers/main/en/main_classes/optimizer_schedules#transformers.get_cosine_schedule_with_warmup
+- Modal pricing, checked2026-10-19: https://modal.com/pricing

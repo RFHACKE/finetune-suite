@@ -1,7 +1,7 @@
-"""Twelve continuous six-epoch fits, evaluated on full sets after every epoch.
+"""Independent SST-2 epoch budgets: four models, six budgets, two seeds.
 
-This observes learning trajectories under a six-epoch cosine schedule. It does
-not compare independent training budgets. No model checkpoints are exported.
+Each fit starts from the pinned backbone with a fresh optimizer and a cosine
+schedule planned for its entire budget. No model checkpoints are exported.
 """
 
 from __future__ import annotations
@@ -19,9 +19,9 @@ from rank_suite.protocol import digest, immutable_json, source_digest
 
 HERE = Path(__file__).resolve().parent
 MODELS = tuple(config.DEFAULT_MODEL_KEYS)
-SEEDS = (42, 123, 456)
-EPOCHS = 6
-OBSERVED_EPOCHS = tuple(range(1, EPOCHS + 1))
+SEEDS = (42, 123)
+EPOCH_BUDGETS = tuple(range(1, 7))
+STEPS_PER_EPOCH = 156
 RANK = 16
 SCOPES = {"sst2": ("sst2",)}
 
@@ -36,7 +36,7 @@ def protocol(scope):
     if scope not in SCOPES:
         raise ValueError(f"Unknown scope: {scope}")
     return {
-        "schema": "epoch-trajectory-study-v1",
+        "schema": "independent-epoch-budget-study-v1",
         "scope": scope,
         "task_order": list(SCOPES[scope]),
         "models": list(MODELS),
@@ -44,10 +44,10 @@ def protocol(scope):
         "data_revision": config.DATA_REVISION,
         "source_sha256": study_source_digest(),
         "suite_source_sha256": source_digest(),
-        "training_epochs": EPOCHS,
-        "observed_epochs": list(OBSERVED_EPOCHS),
-        "expected_runs": 12,
-        "expected_epoch_observations": 72,
+        "epoch_budgets": list(EPOCH_BUDGETS),
+        "expected_runs": len(MODELS) * len(SEEDS) * len(EPOCH_BUDGETS),
+        "expected_epoch_observations": len(MODELS) * len(SEEDS) * sum(EPOCH_BUDGETS),
+        "expected_optimizer_steps": len(MODELS) * len(SEEDS) * sum(EPOCH_BUDGETS) * STEPS_PER_EPOCH,
         "seeds": list(SEEDS),
         "rank": RANK,
         "learning_rates": config.DEFAULT_LORA_LR,
@@ -73,12 +73,13 @@ def protocol(scope):
         "attention": config.ATTN_IMPL,
         "deterministic_algorithms": False,
         "schedule": {
-            "policy": "one_continuous_six_epoch_cosine_schedule",
+            "policy": "fresh_budget_matched_cosine_schedule_per_fit",
             "warmup_fraction": config.WARMUP_FRAC,
-            "total_steps": "ceil(2490/16) * 6 = 936",
-            "reason": "Observe each epoch in one continuing fit; optimizer and scheduler are not reset at observations.",
+            "total_steps": "ceil(2490/16) * epoch_budget = 156 * epoch_budget",
+            "warmup_steps": "ceil(0.03 * total_steps)",
+            "reason": "Compare independently completed training policies. Duration and its matched cosine schedule vary together.",
         },
-        "initialization": "fresh pinned backbone per model/seed; one adapter initialization per six-epoch fit",
+        "initialization": "fresh pinned backbone, adapter, heads, optimizer, scheduler and shuffle generator per model/seed/budget; matching initial adapter/head checksums across budgets within a seed",
         "task_head_seed_positions": list(config.TASK_KEYS),
         "shuffle_seed": "run_seed * 100 + original_task_position",
         "observations": {
@@ -92,7 +93,7 @@ def protocol(scope):
             "not_saved": ["model weights", "adapter weights", "optimizer states", "projection tensors"],
         },
         "analysis": {
-            "primary": "full SST-2 validation NLL at each observed epoch, mean across seeds",
+            "primary": "full SST-2 validation NLL at the FINAL epoch of each independent budget, mean across two paired seeds",
             "secondary": [
                 "validation accuracy",
                 "training NLL",
@@ -100,15 +101,16 @@ def protocol(scope):
                 "confidence on wrong predictions",
                 "Brier score",
             ],
-            "paired_reference_epoch": 3,
+            "paired_reference_epoch_budget": 3,
             "planned_later_comparisons": [4, 5, 6],
             "practical_nll_rise": 0.02,
-            "overfitting_pattern": "validation NLL rises while same-split training NLL falls versus epoch3",
-            "consistent_pattern": "mean validation NLL rise >0.02 and paired overfitting pattern in all three seeds; descriptive only",
-            "uncertainty": "individual seeds and sample SD; three seeds do not establish a universal optimum",
+            "overfitting_pattern": "endpoint validation NLL rises while same-split endpoint training NLL falls versus budget3",
+            "consistent_pattern": "mean endpoint validation NLL rise >0.02 and paired overfitting direction in both seeds; a descriptive screening rule, not a significance test",
+            "uncertainty": "individual paired seeds and sample SD (n=2); no confidence interval or universal optimum claim",
             "selection_caveat": "Previously inspected official validation sets are reused for this planned exploratory comparison. No untouched test-set claim.",
-            "schedule_caveat": "Epoch3 here follows a six-epoch schedule, unlike the original three-epoch fits. No claim of an optimal independent training budget.",
-            "hypothesis": "Epoch3 has the lowest observed mean validation NLL and later epochs show overfitting; evaluate, do not assume.",
+            "schedule_caveat": "Each budget has its own cosine horizon. Intermediate observations are for learning curves only and are never pooled into endpoint budget comparisons. This estimates duration plus its matched schedule, not duration at a fixed learning-rate path.",
+            "scope_caveat": "SST-2 only, rank16, two seeds. Does not determine optimal epochs for RTE/MNLI, other ranks, or continual retention. Global suite defaults are unchanged.",
+            "hypothesis": "Budget3 has the lowest observed mean validation NLL and budgets4-6 show overfitting; evaluate, do not assume.",
         },
     }
 
@@ -116,9 +118,10 @@ def protocol(scope):
 def expected_grid(scope):
     return [
         {
-            "run_id": f"{model}-sixepochs-s{seed}",
+            "run_id": f"{model}-e{budget}-s{seed}",
             "model": model,
-            "training_epochs": EPOCHS,
+            "epoch_budget": budget,
+            "training_epochs": budget,
             "seed": seed,
             "rank": RANK,
             "task_order": list(SCOPES[scope]),
@@ -127,6 +130,7 @@ def expected_grid(scope):
         }
         for model in MODELS
         for seed in SEEDS
+        for budget in EPOCH_BUDGETS
     ]
 
 
@@ -183,7 +187,6 @@ def run_fit(identity, control, data, tokenizer, model_root, flush, deadline):
     # Preserve original task-position head seeds even in the SST-2-only study.
     all_heads = make_task_heads(config.TASK_KEYS, mspec.d_model, identity["seed"], "cpu")
     trained = wrap_lora(model, RANK)
-    adapter_parameters = [p for p in trained.parameters() if p.requires_grad]
     initial = {
         "adapter_sha256": parameter_digest(trained.named_parameters()),
         "heads_sha256": parameter_digest(all_heads.named_parameters()),
@@ -193,6 +196,8 @@ def run_fit(identity, control, data, tokenizer, model_root, flush, deadline):
     utils.save_json(attempt / "initialization.json", initial)
     trained.to("cuda")
     all_heads.to("cuda")
+    # Collect live Parameter objects after device transfer.
+    adapter_parameters = [p for p in trained.parameters() if p.requires_grad]
     transformer = backbone_transformer(trained)
     step = 0
     summaries, boundaries = {}, []
@@ -239,6 +244,7 @@ def run_fit(identity, control, data, tokenizer, model_root, flush, deadline):
                     "task": key,
                     "epoch": epoch,
                     "training_epochs": identity["training_epochs"],
+                    "epoch_budget": identity["epoch_budget"],
                     "updated_unix": time.time(),
                 },
             )
@@ -281,6 +287,7 @@ def run_fit(identity, control, data, tokenizer, model_root, flush, deadline):
             "elapsed_s": time.monotonic() - started,
             "peak_vram_gb": torch.cuda.max_memory_allocated() / 1e9,
             "initialization": initial,
+            "final_adapter_sha256": parameter_digest(trained.named_parameters()),
             "train_summary": summaries,
             "boundaries": boundaries,
             "epoch_metrics": str((attempt / "epoch_metrics.jsonl").relative_to(root)),
