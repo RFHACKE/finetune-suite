@@ -170,6 +170,13 @@ The supervisor uses four archive workers and 8/4/2 connections per archive acros
 its three transport attempts. After fifteen minutes without new archive bytes,
 it saves partial controls, stops that attempt and retries. The account spending
 guard and endpoint cleanup apply to every attempt.
+Billing reads time out after thirty seconds. A temporary failure may reuse a
+checked reading for up to fifteen minutes if more than $0.50 remains below the
+approved ceiling, retrying billing every thirty seconds. Stale or insufficient
+headroom pauses collection; a live reading retains the $0.25 stop margin.
+`execution/download-billing-status.json` and `execution/download-billing-errors.jsonl`
+record those checks. Exhausting three transport attempts returns an error,
+allowing the existing bounded systemd restart policy to resume saved partials.
 An already completed target exits without any network downloads and retains
 its completed state. If an interrupted transfer's token file or endpoint is
 unavailable, restore that access before resuming; preserve the partial files.

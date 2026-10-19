@@ -149,8 +149,13 @@ Raw collection uses a separate, authenticated CPU endpoint named
 or a spending stop. It reuses the previously authorized random-token access
 mechanism. The original endpoint is unaffected. The spending guard reads
 `Finetune-result/execution/active-budget.json` and checks account usage every
-five minutes, retaining a $0.25 margin. Transport retries are limited to three;
-there are no GPU retries. `execution/raw-delivery-*.json` distinguishes a
+five minutes, retaining a $0.25 margin. Brief billing API failures can reuse a
+checked reading for at most fifteen minutes, with more than $0.50 of headroom,
+while retrying every thirty seconds; otherwise collection pauses with partials
+retained. Billing checks and failures have separate `download-billing-*` logs.
+Each collection cycle has three transport attempts; exhaustion returns an
+error so the bounded systemd restart policy can recover it. There are no GPU
+retries. `execution/raw-delivery-*.json` distinguishes a
 complete verified download, a budget stop and a transport failure. Raw
 collection alone does not claim completed CPU spectral analysis or final audit.
 The CPU endpoint reserves 1 GiB RAM per container, caps it at 2 GiB and limits

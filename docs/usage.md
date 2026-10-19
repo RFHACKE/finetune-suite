@@ -566,6 +566,17 @@ Supervisor health is recorded separately every 30 seconds in
 a resumable retry with lower concurrency. Normal failures append an immediate
 `status=stopped` progress entry.
 
+The spending guard checks billing before starting the endpoint and every five
+minutes while downloading. A temporary API failure can use a checked balance
+no more than fifteen minutes old, provided it leaves more than $0.50 of
+headroom; billing is then retried every thirty seconds. Without that recent
+balance, collection pauses with its partial files retained. A fresh reading
+still stops transfers at the configured ceiling minus $0.25.
+`execution/download-billing-status.json` shows whether the reading is live or
+cached; `execution/download-billing-errors.jsonl` records API failures.
+Exhausted transport attempts exit unsuccessfully so the documented systemd
+restart policy can recover them.
+
 The [Modal delivery reference](MODAL_EXECUTION.md#finished-cohort-segmented-delivery)
 documents all downloader options, saved settings and direct resumption while
 the endpoint is active. The [extension reference](LARGE_RANK_EXTENSION.md#cloud-execution-and-retrieval)

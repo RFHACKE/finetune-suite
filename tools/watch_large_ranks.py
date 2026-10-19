@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import json
+import math
 import os
 from pathlib import Path
 import signal
@@ -69,7 +70,67 @@ def start_verified_cpu_analysis(workspace, root):
 def supervisor_status(root, phase, **fields):
     path = root / "execution/download-supervisor.json"
     previous = json.loads(path.read_text()) if path.exists() else {}
+    if phase in {"starting", "deploying", "downloading", "complete"}:
+        if previous.get("error"):
+            previous["last_error"] = {key: previous[key] for key in
+                                      ("error", "traceback", "updated_unix") if key in previous}
+        for key in ("error", "traceback", "reason"):
+            previous.pop(key, None)
     save(path, {**previous, "pid": os.getpid(), "updated_unix": time.time(), "phase": phase, **fields})
+
+
+def download_billing(execution, cap):
+    """Allow a brief API outage only with a recent balance and ample headroom.
+
+    Return (provider payload, used_cache). A successful check is retained for at
+    most 15 minutes; cached operation requires $0.50 of headroom. A fresh cost
+    at the limit still stops collection immediately in the caller.
+    """
+    path = execution / "billing-raw-delivery.json"
+    now = time.time()
+    try:
+        result = subprocess.run([sys.executable, "-m", "modal", "billing", "summary", "--json"],
+                                capture_output=True, text=True, timeout=30)
+        if result.returncode:
+            raise RuntimeError(f"Billing command exited {result.returncode}")
+        metered = json.loads(result.stdout)
+        cost = float(metered["metered_cost"])
+        if not math.isfinite(cost) or cost < 0:
+            raise ValueError("Invalid metered cost")
+    except (subprocess.TimeoutExpired, OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+        # Never log command output, credentials or exception arguments.
+        problem = {"updated_unix": now, "error_type": type(exc).__name__,
+                   "retry_after_s": 30, "approved_total_usd": cap}
+        with (execution / "download-billing-errors.jsonl").open("a") as log:
+            log.write(json.dumps(problem) + "\n")
+        try:
+            cached = json.loads(path.read_text())
+            age = time.time() - path.stat().st_mtime
+            cost = float(cached["metered_cost"])
+            usable = 0 <= age <= 900 and math.isfinite(cost) and 0 <= cost < float(cap) - .50
+        except (OSError, ValueError, KeyError, TypeError):
+            usable = False
+        if not usable:
+            save(execution / "download-billing-status.json", {**problem, "source": "unavailable",
+                 "downloads_must_pause": True})
+            raise RuntimeError("Cannot verify download budget: no recent checked balance with sufficient headroom; partial data retained") from exc
+        save(execution / "download-billing-status.json", {**problem, "source": "recent_cache",
+             "cache_age_s": age, "maximum_cache_age_s": 900, "metered_cost": cost})
+        return cached, True
+    save(path, metered)
+    save(execution / "download-billing-status.json", {"updated_unix": time.time(), "source": "live",
+         "metered_cost": cost, "approved_total_usd": cap, "next_check_s": 300})
+    return metered, False
+
+
+def download_budget_exhausted(root, cap, metered):
+    if float(metered["metered_cost"]) < float(cap) - .25:
+        return False
+    save(root / "execution/raw-delivery-budget-stop.json", {
+        "metered_cost": metered["metered_cost"], "approved_total_usd": cap,
+        "partial_downloads_retained": True, "remote_raw_exports_retained": True})
+    supervisor_status(root, "budget_stop", metered_cost=metered["metered_cost"], approved_total_usd=cap)
+    return True
 
 
 def collect_raw(workspace, root, launch):
@@ -107,6 +168,13 @@ def _collect_raw(workspace, root, launch):
              "reason": "Original cohort downloads have priority", "verified_original_runs":
                  len(state.get("verified_runs", [])), "raw_exports_preserved_remotely": True})
         time.sleep(30)
+    # Verify the budget before deploying the CPU endpoint or opening transfers.
+    cap = json.loads((original / "active-budget.json").read_text())["approved_total_usd"]
+    metered, cached_billing = download_billing(execution, cap)
+    if download_budget_exhausted(root, cap, metered):
+        return
+    last_billing = time.monotonic()
+    billing_interval = 30 if cached_billing else 300
     stream_app = "fyp-large-rank-stream"
     environment = os.environ.copy()
     environment.update({"FYP_MODAL_RUN": launch["run"], "FYP_STREAM_APP": stream_app})
@@ -123,7 +191,7 @@ def _collect_raw(workspace, root, launch):
                 child = subprocess.Popen([*command, "--connections", str(connections)], cwd=workspace,
                                          stdout=log, stderr=subprocess.STDOUT,
                                          stdin=subprocess.DEVNULL, start_new_session=True)
-                stopped, stalled, last_billing = False, False, 0
+                stopped, stalled = False, False
                 last_bytes, last_progress = None, time.monotonic()
                 try:
                     while child.poll() is None:
@@ -135,7 +203,9 @@ def _collect_raw(workspace, root, launch):
                         supervisor_status(root, "downloading", child_pid=child.pid, attempt=attempt,
                                           workers=4, connections_per_archive=connections,
                                           downloaded_bytes=last_bytes, total_bytes=progress["total_bytes"],
-                                          verified_runs=progress["verified_runs"], no_progress_seconds=idle)
+                                          verified_runs=progress["verified_runs"], no_progress_seconds=idle,
+                                          metered_cost=metered["metered_cost"], approved_total_usd=cap,
+                                          billing_source="recent_cache" if cached_billing else "live")
                         if idle >= 900:
                             stalled = True
                             supervisor_status(root, "stalled", reason="No new archive bytes for fifteen minutes")
@@ -145,23 +215,14 @@ def _collect_raw(workspace, root, launch):
                         except Exception as exc:
                             save(execution / "cpu-start-error.json", {"error": repr(exc),
                                  "raw_collection_continues": True})
-                        if time.monotonic() - last_billing >= 300:
+                        if time.monotonic() - last_billing >= billing_interval:
                             cap = json.loads((original / "active-budget.json").read_text())["approved_total_usd"]
-                            billing = subprocess.run([sys.executable, "-m", "modal", "billing", "summary", "--json"],
-                                                     capture_output=True, text=True, timeout=60)
-                            if billing.returncode:
-                                raise RuntimeError("Cannot verify the remaining download budget; partial data retained")
-                            metered = json.loads(billing.stdout)
-                            save(execution / "billing-raw-delivery.json", metered)
-                            if float(metered["metered_cost"]) >= float(cap) - .25:
+                            metered, cached_billing = download_billing(execution, cap)
+                            if download_budget_exhausted(root, cap, metered):
                                 stopped = True
-                                save(execution / "raw-delivery-budget-stop.json", {
-                                    "metered_cost": metered["metered_cost"], "approved_total_usd": cap,
-                                    "partial_downloads_retained": True, "remote_raw_exports_retained": True})
-                                supervisor_status(root, "budget_stop", metered_cost=metered["metered_cost"],
-                                                  approved_total_usd=cap)
                                 break
                             last_billing = time.monotonic()
+                            billing_interval = 30 if cached_billing else 300
                         time.sleep(30)
                 finally:
                     if child.poll() is None:
@@ -194,6 +255,7 @@ def _collect_raw(workspace, root, launch):
                  "reason": "Three transport attempts exhausted; resume from saved partials",
                  "remote_raw_exports_retained": True})
             supervisor_status(root, "deferred", reason="Three transport attempts exhausted")
+            raise RuntimeError("Three transport attempts exhausted; partial data retained for supervisor restart")
         finally:
             subprocess.run([sys.executable, "-m", "modal", "app", "stop", "--yes", stream_app],
                            cwd=workspace, stdout=log, stderr=subprocess.STDOUT, check=False)
