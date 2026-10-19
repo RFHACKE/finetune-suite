@@ -32,7 +32,7 @@ RATE = 3600 * (0.000542 + 2 * 0.0000131 + 16 * 0.00000222)
 LOCAL = HERE / "execution"
 app = modal.App("fyp-epoch-trajectory-study", include_source=False)
 image = base_image.uv_pip_install("python-docx==1.2.0", "python-pptx==1.0.2").env(
-    {"PYTHONPATH": "/app:/app/tools:/app/Epochs-test"}
+    {"PYTHONPATH": "/app:/app/tools:/app/Epochs-test", "FYP_EPOCH_RUN": RUN}
 )
 for name in (
     "epoch_study.py",
