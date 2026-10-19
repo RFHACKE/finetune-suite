@@ -52,12 +52,13 @@ class DownloadProgressLog:
         self.stop = threading.Event()
         self.thread = None
 
-    def _write(self, log, progress, now):
+    def _write(self, log, progress, now, status=None):
         total = progress["total_bytes"]
         percent = 100 * progress["downloaded_bytes"] / total if total else 0
         log.write(f"{now.isoformat(timespec='seconds').replace('+00:00', 'Z')}  "
                   f"{progress['downloaded_bytes'] / 1e9:.2f} GB / {total / 1e9:.2f} GB  "
                   f"({percent:.1f}%)  verified={progress['verified_runs']}/{progress['expected_runs']}"
+                  + (f"  status={status}" if status else "")
                   + ("  complete" if progress["complete"] else "") + "\n")
         log.flush()
 
@@ -86,6 +87,9 @@ class DownloadProgressLog:
                 try:
                     progress = snapshot(self.root, self.catalog)
                     now = datetime.now(timezone.utc)
+                    if self.stop.is_set() and not progress["complete"]:
+                        self._write(log, progress, now, status="stopped")
+                        return
                     remaining = INTERVAL_SECONDS - (now - last_time).total_seconds() if last_time else 0
                     if ((remaining <= 0 and not (progress["complete"] and already_complete))
                             or (progress["complete"] and not already_complete)):

@@ -133,6 +133,10 @@ For download resumption, `./start-download.sh` is the executable shortcut for
 the Modal SDK installed; `MODAL_PYTHON=/path/to/python` overrides that choice.
 Pass `--root PATH` to select another local extension directory. It reports an
 already active or completed transfer without starting a second downloader.
+When systemd is available it runs as a background service with restart-on-failure;
+`--foreground` keeps it in the terminal instead. See the
+[delivery reference](MODAL_EXECUTION.md#finished-cohort-segmented-delivery) for
+service status/stop commands, heartbeat files and the restart limits.
 
 `execution/progress.json` explicitly distinguishes retrieved diagnostic
 records from raw scientific exports. The watcher uses the local frozen source
@@ -149,6 +153,12 @@ five minutes, retaining a $0.25 margin. Transport retries are limited to three;
 there are no GPU retries. `execution/raw-delivery-*.json` distinguishes a
 complete verified download, a budget stop and a transport failure. Raw
 collection alone does not claim completed CPU spectral analysis or final audit.
+The CPU endpoint reserves 1 GiB RAM per container, caps it at 2 GiB and limits
+per-container concurrency to four requests. Four local archive workers use eight,
+four and two connections across successive attempts. Fifteen minutes without
+new archive bytes triggers a resumable restart. The supervisor's 30-second
+heartbeat and exception tracebacks are saved independently of the archive worker
+in `execution/download-supervisor.json` and `execution/download-supervisor.log`.
 As verified raw exports arrive, the watcher starts local CPU spectral helpers
 with two threads per model and this cohort's frozen source. They save matrix
 diagnostics and caches independently of the downloader; their PIDs and logs

@@ -89,6 +89,16 @@ class DownloadProgressTests(unittest.TestCase):
             self.assertTrue(logger.path.read_text().startswith(previous))
             self.assertEqual(len(logger.path.read_text().splitlines()), 2)
 
+    def test_interrupted_transfer_writes_stopped_entry_without_waiting_ten_minutes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            logger = DownloadProgressLog(temporary)
+            logger.stop.set()
+            progress = {"downloaded_bytes": 100, "total_bytes": 200,
+                        "verified_runs": 1, "expected_runs": 2, "complete": False}
+            with patch("tools.download_progress.snapshot", return_value=progress):
+                logger.run()
+            self.assertTrue(logger.path.read_text().splitlines()[-1].endswith("status=stopped"))
+
 
 if __name__ == "__main__":
     unittest.main()

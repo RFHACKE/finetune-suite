@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 
 import modal
 
@@ -65,13 +66,37 @@ def start_verified_cpu_analysis(workspace, root):
         save(journal_path, journal)
 
 
+def supervisor_status(root, phase, **fields):
+    path = root / "execution/download-supervisor.json"
+    previous = json.loads(path.read_text()) if path.exists() else {}
+    save(path, {**previous, "pid": os.getpid(), "updated_unix": time.time(), "phase": phase, **fields})
+
+
 def collect_raw(workspace, root, launch):
+    """Record failures and a heartbeat independently of the archive worker."""
+    def pause(_signum, _frame):
+        raise KeyboardInterrupt
+    previous = signal.signal(signal.SIGTERM, pause)
+    supervisor_status(root, "starting")
+    try:
+        _collect_raw(workspace, root, launch)
+    except KeyboardInterrupt:
+        supervisor_status(root, "paused", reason="Local interrupt; partial downloads retained")
+    except Exception as exc:
+        supervisor_status(root, "error", error=repr(exc), traceback=traceback.format_exc())
+        raise
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+
+
+def _collect_raw(workspace, root, launch):
     """Wait for the original download, then collect within the shared USD cap."""
     execution = root / "execution"
     original = workspace / "Finetune-result/execution"
     catalog = execution / "delivery-catalog.json"
     if not catalog.exists():
         save(execution / "raw-delivery-deferred.json", {"reason": "Checked delivery catalog missing"})
+        supervisor_status(root, "deferred", reason="Checked delivery catalog missing")
         return
     while True:
         state_path = original / "retrieval.json"
@@ -86,18 +111,35 @@ def collect_raw(workspace, root, launch):
     environment = os.environ.copy()
     environment.update({"FYP_MODAL_RUN": launch["run"], "FYP_STREAM_APP": stream_app})
     with (execution / "raw-delivery.log").open("a") as log:
+        supervisor_status(root, "deploying")
         subprocess.run([sys.executable, "-m", "modal", "deploy", "tools/modal_stream.py"],
                        cwd=workspace, env=environment, stdout=log, stderr=subprocess.STDOUT, check=True)
         try:
             url = modal.Function.from_name(stream_app, "stream_archives").get_web_url()
             command = [sys.executable, "-u", "-m", "tools.collect_delivery", "--catalog", str(catalog),
-                       "--target", str(root), "--archive-url", url, "--workers", "16", "--connections", "16"]
+                       "--target", str(root), "--archive-url", url, "--workers", "4"]
             for attempt in range(1, 4):
-                child = subprocess.Popen(command, cwd=workspace, stdout=log, stderr=subprocess.STDOUT,
+                connections = {1: 8, 2: 4, 3: 2}[attempt]
+                child = subprocess.Popen([*command, "--connections", str(connections)], cwd=workspace,
+                                         stdout=log, stderr=subprocess.STDOUT,
                                          stdin=subprocess.DEVNULL, start_new_session=True)
-                stopped, last_billing = False, 0
+                stopped, stalled, last_billing = False, False, 0
+                last_bytes, last_progress = None, time.monotonic()
                 try:
                     while child.poll() is None:
+                        from tools.download_progress import snapshot
+                        progress = snapshot(root, catalog)
+                        if progress["downloaded_bytes"] != last_bytes:
+                            last_bytes, last_progress = progress["downloaded_bytes"], time.monotonic()
+                        idle = time.monotonic() - last_progress
+                        supervisor_status(root, "downloading", child_pid=child.pid, attempt=attempt,
+                                          workers=4, connections_per_archive=connections,
+                                          downloaded_bytes=last_bytes, total_bytes=progress["total_bytes"],
+                                          verified_runs=progress["verified_runs"], no_progress_seconds=idle)
+                        if idle >= 900:
+                            stalled = True
+                            supervisor_status(root, "stalled", reason="No new archive bytes for fifteen minutes")
+                            break
                         try:
                             start_verified_cpu_analysis(workspace, root)
                         except Exception as exc:
@@ -116,6 +158,8 @@ def collect_raw(workspace, root, launch):
                                 save(execution / "raw-delivery-budget-stop.json", {
                                     "metered_cost": metered["metered_cost"], "approved_total_usd": cap,
                                     "partial_downloads_retained": True, "remote_raw_exports_retained": True})
+                                supervisor_status(root, "budget_stop", metered_cost=metered["metered_cost"],
+                                                  approved_total_usd=cap)
                                 break
                             last_billing = time.monotonic()
                         time.sleep(30)
@@ -138,12 +182,18 @@ def collect_raw(workspace, root, launch):
                         save(execution / "cpu-start-error.json", {"error": repr(exc)})
                     save(execution / "raw-delivery-finished.json", {"updated_unix": time.time(),
                          "verified_runs": 40, "cpu_spectral_audit": "pending_separate_analysis"})
+                    supervisor_status(root, "complete", verified_runs=40)
                     return
                 save(execution / "raw-delivery-attempt.json", {"attempt": attempt,
-                     "returncode": child.returncode, "partial_data_retained": True})
+                     "returncode": child.returncode, "partial_data_retained": True, "stalled": stalled})
+                supervisor_status(root, "retrying", attempt=attempt, returncode=child.returncode,
+                                  stalled=stalled)
+                if attempt < 3:
+                    time.sleep(15)
             save(execution / "raw-delivery-deferred.json", {
                  "reason": "Three transport attempts exhausted; resume from saved partials",
                  "remote_raw_exports_retained": True})
+            supervisor_status(root, "deferred", reason="Three transport attempts exhausted")
         finally:
             subprocess.run([sys.executable, "-m", "modal", "app", "stop", "--yes", stream_app],
                            cwd=workspace, stdout=log, stderr=subprocess.STDOUT, check=False)

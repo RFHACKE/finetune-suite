@@ -549,11 +549,22 @@ The launcher changes to the repository directory, selects a Python interpreter
 with the Modal SDK, and runs `tools.watch_large_ranks --resume-download`.
 Set `MODAL_PYTHON=/path/to/python` to choose that interpreter explicitly.
 It accepts the watcher's arguments; `./start-download.sh --help` shows them.
+With systemd available it starts a background service independent of the
+terminal or Codex session; `--foreground` keeps it in the terminal. The default
+system service can be checked with `systemctl status fyp-result-download` and
+stopped with `systemctl stop fyp-result-download`; user services use
+`systemctl --user`. The launcher prints the applicable service name. Rerun it
+after reboot, and keep the computer awake for local downloads.
 This resumes saved partial archives, skips verified ones, manages the CPU
 download endpoint and spending guard, and starts no GPU training. If a
 downloader is already active, it reports that process and leaves it running.
 Keep the result directory and its `.download`/`.aria2` files. Progress appends
 to `execution/download-progress.log` under that target every ten minutes.
+Supervisor health is recorded separately every 30 seconds in
+`execution/download-supervisor.json`; stdout and failure tracebacks persist in
+`execution/download-supervisor.log`. A fifteen-minute transfer stall triggers
+a resumable retry with lower concurrency. Normal failures append an immediate
+`status=stopped` progress entry.
 
 The [Modal delivery reference](MODAL_EXECUTION.md#finished-cohort-segmented-delivery)
 documents all downloader options, saved settings and direct resumption while

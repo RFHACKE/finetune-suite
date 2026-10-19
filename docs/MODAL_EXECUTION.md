@@ -109,8 +109,11 @@ executable. Its complete options are:
 | `--connections` | Saved value, otherwise `16` | HTTP range connections per archive, from 1 through 16. |
 | `-h`, `--help` | — | Show help. |
 
-The US streaming function permits up to 16 CPU containers with 16 concurrent
-requests each. Native `.aria2` control files and partial data support resumption.
+The US streaming function permits up to eight CPU containers with four concurrent
+requests each. Each container requests 1 GiB RAM with a 2 GiB cap and a 24-hour
+function timeout. The previous 256 MiB request/1 GiB cap with 16 concurrent
+requests suffered repeated memory-related container terminations on the larger
+archives. Native `.aria2` control files and partial data support resumption.
 Resumption is the default. Keep the entire result directory, especially
 `execution/retrieval.json`, `execution/incoming/*.download`, and their `.aria2`
 files. Verified runs are skipped, complete saved archives are checksum-checked
@@ -142,6 +145,31 @@ an existing active downloader rather than starting a second transfer.
 The shell launcher selects Python with the Modal SDK installed and invokes
 `tools.watch_large_ranks --resume-download`. `MODAL_PYTHON` overrides its
 interpreter selection; additional arguments are forwarded to the watcher.
+When systemd is available, the launcher starts a background service that survives
+the shell and Codex session. Root uses a system service; other accounts use their
+user manager when available. The default service is `fyp-result-download`.
+Unexpected supervisor failures restart after 30 seconds, with at most three
+starts per hour. It is a transient service: rerun the launcher after a machine
+reboot. `--foreground` runs in the current terminal instead; hosts without a
+working systemd manager also use foreground mode. `--help` documents this switch.
+
+For the default system service, inspect or stop it with:
+
+```bash
+systemctl status fyp-result-download
+systemctl stop fyp-result-download
+```
+
+Use `systemctl --user` for a user service. Custom `--root` targets receive a
+service-name suffix printed by the launcher. `execution/download-supervisor.log`
+retains stdout and tracebacks; `execution/download-supervisor.json` records the
+PID, phase, update time, child PID, attempt, bytes and last progress. Its heartbeat
+updates approximately every 30 seconds. A dead PID or stale heartbeat signals a
+failed supervisor even if the progress log's last entry showed normal transfer.
+The supervisor uses four archive workers and 8/4/2 connections per archive across
+its three transport attempts. After fifteen minutes without new archive bytes,
+it saves partial controls, stops that attempt and retries. The account spending
+guard and endpoint cleanup apply to every attempt.
 An already completed target exits without any network downloads and retains
 its completed state. If an interrupted transfer's token file or endpoint is
 unavailable, restore that access before resuming; preserve the partial files.
@@ -160,7 +188,8 @@ and an estimate of partial transfers from allocated filesystem blocks. Sparse
 files' final logical lengths do not count as downloaded bytes. Metadata and
 unrelated files are excluded; verified archive counts are shown separately.
 Each cohort writes its own log. Entries append across restarts; the final
-completion entry can occur before the next ten-minute interval.
+completion entry can occur before the next ten-minute interval. A normally
+interrupted or failed collector also writes an immediate `status=stopped` entry.
 
 To attach the same logger to an already running download without restarting it:
 

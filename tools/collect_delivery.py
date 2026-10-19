@@ -12,6 +12,7 @@ import fcntl
 import json
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import signal
 import subprocess
@@ -81,6 +82,7 @@ class SegmentedStream(ArchiveStream):
                     self.processes.discard(result)
         if result.returncode:
             diagnostic = (stdout + stderr).decode(errors="replace").replace(self.token, "[redacted]")
+            diagnostic = re.sub(r"([?&]__modal_attempt_token=)[^\s&]+", r"\1[redacted]", diagnostic)
             destination.with_name(destination.name + ".error.log").write_text(diagnostic)
             raise OSError(f"Segmented archive download failed (aria2 exit {result.returncode}); partial data retained")
         if destination.stat().st_size != entry.size or sha256(destination) != expected_sha:

@@ -121,7 +121,9 @@ class DeliveryTests(unittest.TestCase):
             control = root / "partial.download.aria2"
             control.write_bytes(b"segments")
             stream = SegmentedStream("https://example.modal.run", token, executable, 1)
-            child = Mock(returncode=1, communicate=lambda: (b"", b""))
+            diagnostic = ("Authorization: Bearer " + token.read_text()
+                          + " URI=https://example.modal.run/file?__modal_attempt_token=private-attempt-token\n").encode()
+            child = Mock(returncode=1, communicate=lambda: (diagnostic, b""))
             def start(*_args, **_kwargs):
                 stream.stop()
                 return child
@@ -131,6 +133,9 @@ class DeliveryTests(unittest.TestCase):
             child.send_signal.assert_called_once_with(signal.SIGINT)
             self.assertEqual(target.read_bytes(), b"saved")
             self.assertEqual(control.read_bytes(), b"segments")
+            recorded = target.with_name(target.name + ".error.log").read_text()
+            self.assertNotIn(token.read_text(), recorded)
+            self.assertNotIn("private-attempt-token", recorded)
 
     def test_resume_keeps_partial_bytes_skips_verified_and_commits_before_cleanup(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -228,7 +233,7 @@ class DeliveryTests(unittest.TestCase):
             (original / "active-budget.json").write_text('{"approved_total_usd":46}')
             root = workspace / "Finetune-result/large-ranks"
             (root / "execution").mkdir(parents=True)
-            (root / "execution/delivery-catalog.json").write_text('{}')
+            (root / "execution/delivery-catalog.json").write_text('{"archives":[]}')
             child = SimpleNamespace(pid=12345, returncode=None)
             child.poll = lambda: child.returncode
             def finish(timeout):
@@ -255,6 +260,60 @@ class DeliveryTests(unittest.TestCase):
             self.assertEqual(kill.call_count, 1)
             self.assertEqual(run.call_args.args[0][-1], "fyp-large-rank-stream")
             self.assertTrue(all("modal_large_ranks.py" not in call.args[0] for call in run.call_args_list))
+
+    def test_supervisor_records_unexpected_exit_reason(self):
+        from tools import watch_large_ranks as watcher
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "execution").mkdir()
+            with (patch.object(watcher, "_collect_raw", side_effect=RuntimeError("billing fixture unavailable")),
+                  self.assertRaises(RuntimeError)):
+                watcher.collect_raw(root, root, {"run": "fixture"})
+            recorded = json.loads((root / "execution/download-supervisor.json").read_text())
+            self.assertEqual(recorded["phase"], "error")
+            self.assertIn("billing fixture unavailable", recorded["traceback"])
+
+    def test_stalled_transfer_retries_and_keeps_partial_data(self):
+        from tools import watch_large_ranks as watcher
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            original = workspace / "Finetune-result/execution"
+            original.mkdir(parents=True)
+            (original / "retrieval.json").write_text('{"retrieval_finished":true}')
+            (original / "active-budget.json").write_text('{"approved_total_usd":46}')
+            root = workspace / "Finetune-result/large-ranks"
+            execution = root / "execution"
+            execution.mkdir(parents=True)
+            (execution / "delivery-catalog.json").write_text('{"archives":[]}')
+            partial = execution / "saved.download"
+            partial.write_bytes(b"saved before retry")
+            clock = [0]
+            children = []
+            def popen(*_args, **_kwargs):
+                child = SimpleNamespace(pid=12345, returncode=None)
+                child.poll = lambda: child.returncode
+                def finish(timeout):
+                    child.returncode = -2
+                    return -2
+                child.wait = Mock(side_effect=finish)
+                children.append(child)
+                return child
+            def command(args, **_kwargs):
+                return SimpleNamespace(returncode=0, stdout='{"metered_cost":"40"}' if "billing" in args else '')
+            endpoint = SimpleNamespace(get_web_url=lambda: "https://isolated.modal.run")
+            with (patch.object(watcher.subprocess, "run", side_effect=command),
+                  patch.object(watcher.subprocess, "Popen", side_effect=popen),
+                  patch.object(watcher.modal.Function, "from_name", return_value=endpoint),
+                  patch.object(watcher.time, "monotonic", side_effect=lambda: clock[0]),
+                  patch.object(watcher.time, "sleep", side_effect=lambda s: clock.__setitem__(0, clock[0]+s)),
+                  patch.object(watcher.os, "killpg") as kill):
+                watcher.collect_raw(workspace, root, {"run": "extension"})
+            self.assertEqual(len(children), 3)
+            self.assertEqual(kill.call_count, 3)
+            self.assertEqual(partial.read_bytes(), b"saved before retry")
+            recorded = json.loads((execution / "download-supervisor.json").read_text())
+            self.assertEqual(recorded["phase"], "deferred")
+            self.assertTrue(json.loads((execution / "raw-delivery-attempt.json").read_text())["stalled"])
 
 
 if __name__ == "__main__":

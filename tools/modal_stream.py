@@ -40,19 +40,19 @@ image = (modal.Image.debian_slim(python_version="3.11")
 
 
 @app.function(image=image, volumes={"/vault": vault}, secrets=[access_secret()],
-              cpu=(0.125, 1), memory=(256, 1024), timeout=1800,
-              max_containers=16, scaledown_window=5)
-@modal.concurrent(max_inputs=16)
+              cpu=(0.125, 1), memory=(1024, 2048), timeout=86400,
+              max_containers=8, scaledown_window=5)
+@modal.concurrent(max_inputs=4)
 @modal.web_server(8000)
 def stream_archives():
     threading.Thread(target=start_server, daemon=True).start()
 
 
 @app.function(image=image, volumes={"/vault": vault}, secrets=[access_secret()],
-              cpu=(0.125, 1), memory=(256, 1024), timeout=1800,
+              cpu=(0.125, 1), memory=(1024, 2048), timeout=86400,
               max_containers=1, scaledown_window=5,
               region="ap-south", routing_region="ap-south")
-@modal.concurrent(max_inputs=16)
+@modal.concurrent(max_inputs=4)
 @modal.web_server(8000)
 def stream_archives_ap():
     threading.Thread(target=start_server, daemon=True).start()
