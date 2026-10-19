@@ -31,6 +31,9 @@ ENV/
 *.env:Zone.Identifier
 hf.env
 Finetune-result/
+Epochs-test/execution/
+Epochs-test/results/
+Epochs-test/*.pptx
 .modal-state/
 !.env.example
 
