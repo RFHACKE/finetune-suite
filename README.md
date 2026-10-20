@@ -36,6 +36,8 @@ The installer creates a local virtualenv, finds or provisions Python 3.10–3.12
 
 Spectral decomposition and plotting run **after GPU training, on CPU**. Training exports the exact projection weights or LoRA factors at every task boundary. Completed runs are skipped before model loading, and interrupted sequences recover after the last completed task. Cached datasets and pinned model files avoid repeated downloads.
 
+LoRA now keeps one weight representation: standard PEFT adapters plus checksummed storage manifests. CPU spectra load these directly. Existing redundant `projections.pt` files can be verified and removed with `./run.sh checkpoints prune --output <cohort>`; `checkpoints restore` reconstructs compatible files when needed. See [checkpoint storage and reconstruction](docs/CHECKPOINT_STORAGE.md) for provenance, all options, and selective restoration. Full-FT projection snapshots remain required; `--save-lora-projections` optionally enables dual LoRA exports.
+
 The suite does not promise a $25 total. `plan` reports unknown cost until measured pilots cover each model/track, then estimates the remaining work with a planning allowance. Optional `--budget 25 --reserve 5 --hourly-rate <actual-rate>` and `--max-hours` control admission of whole runs. They can overrun by an unmeasured run and **do not stop the rented instance**. Multiple identical GPUs can process independent paired seed blocks with `./run_parallel.sh 0,1 --output results-v3`.
 
 ## Finish on CPU
@@ -82,6 +84,7 @@ Model/tokenizer/data revisions, protocol, source hashes, package freeze and hard
 - [Unattended run, remote failure reports and morning recovery](docs/OVERNIGHT.md)
 - [Validation record and measured CPU spectral timings](docs/VALIDATION.md)
 - [CLI usage](docs/usage.md)
+- [Checkpoint storage, cleanup and reconstruction](docs/CHECKPOINT_STORAGE.md)
 
 ```bash
 .venv/bin/python -m pip install -r requirements-dev.txt

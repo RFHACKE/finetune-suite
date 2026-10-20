@@ -1,5 +1,6 @@
 """Failure classification must never disguise a partial overnight cohort."""
 import json
+import hashlib
 from pathlib import Path
 
 from rank_suite import config
@@ -62,7 +63,8 @@ def test_complete_exports_and_missing_archive_are_reported_separately(tmp_path):
     sizes, boundaries = {}, []
     for i, task in enumerate(config.TASK_KEYS):
         folder = Path("checkpoints") / f"task{i + 1}_{task}"
-        boundaries.append({"path": str(folder), "task": task})
+        boundaries.append({"path": str(folder), "task": task,
+                           "projections_sha256": hashlib.sha256(b"fixture").hexdigest()})
         names = ["adapter_model.safetensors", "adapter_config.json", "heads.pt", "projections.pt"]
         names += [f"predictions_{key}.npz" for key in config.TASK_KEYS[:i + 1]]
         for name in names:

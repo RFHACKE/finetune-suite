@@ -237,6 +237,7 @@ class ExperimentSpec:
     force: bool = False                      # rerun completed runs
     deterministic: bool = False
     save_full_weights: bool = False          # Track B weight snapshots (large!)
+    save_lora_projections: bool = False      # normally reconstruct from the PEFT adapter
     intruder_ref: str = "all"
     intruder_side: str = "left"              # singular-vector side for Def. 1
     micro_batch: Optional[int] = None        # one partition for all tracks/ranks

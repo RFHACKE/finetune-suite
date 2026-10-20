@@ -20,6 +20,8 @@ from urllib.parse import quote, urlsplit
 
 import modal
 
+from rank_suite.checkpoints import (checkpoint_inventory_errors, compacted_projection_record)
+
 MODELS = ["llama3.2-1b", "qwen2.5-1.5b", "granite3.3-2b", "qwen2.5-3b"]
 
 
@@ -117,6 +119,15 @@ class Collector:
         key = entry.path
         previous = self.state["files"].get(key, {})
         version = [entry.size, entry.mtime]
+        compacted = compacted_projection_record(target)
+        if compacted:
+            if compacted["bytes"] != entry.size or (previous.get("sha256_at_retrieval")
+                                                    and previous["sha256_at_retrieval"] != compacted["sha256"]):
+                raise ValueError("Remote projection differs from the intentionally compacted snapshot")
+            return key, {**previous, "remote_version": version,
+                         "sha256_at_retrieval": compacted["sha256"],
+                         "local_path": str(target.relative_to(self.root)), "bytes": entry.size,
+                         "retained_as": compacted["retained_as"]}
         if target.exists() and previous.get("remote_version") == version:
             return key, previous
         expected_archive = self.archive_checksums.get(str(target))
@@ -171,7 +182,8 @@ class Collector:
                     if (not (valid_run or valid_base) or ".." in parts or member.name.startswith("/")
                             or not (member.isdir() or member.isfile())):
                         raise ValueError("Archive contains an unexpected path/type")
-                    archive.extract(member, path=self.root, set_attrs=False)
+                    if not (member.isfile() and compacted_projection_record(self.root / member.name)):
+                        archive.extract(member, path=self.root, set_attrs=False)
             decoder.stdout.close()
             error = decoder.stderr.read().decode(errors="replace")
             if decoder.wait():
@@ -194,8 +206,7 @@ class Collector:
                     if sha256(base) != base_meta["sha256"]:
                         raise ValueError("Pretrained projection checksum mismatch")
                     based[result["model"]] = base_meta["sha256"]
-                if all(sha256(run_dir / b["path"] / "projections.pt") == b["projections_sha256"]
-                       for b in result["boundaries"]):
+                if not checkpoint_inventory_errors(run_dir, result, verify_hashes=True):
                     verified.add(run_id)
             except FileNotFoundError:
                 pass
@@ -235,9 +246,11 @@ class Collector:
                         continue
                     if result["protocol_sha256"] != canonical(controls):
                         raise ValueError("Result protocol does not match worker controls")
-                    required = [str(PurePosixPath("runs") / parts[1] / b["path"] / "projections.pt")
-                                for b in result["boundaries"]]
-                    if all(path in paths for path in required):
+                    prefix_path = PurePosixPath("runs") / parts[1]
+                    if all(str(prefix_path / b["path"] / "projections.pt") in paths
+                           or all(str(prefix_path / b["path"] / name) in paths for name in
+                                  ("adapter_model.safetensors", "adapter_config.json", "projection-storage.json"))
+                           for b in result["boundaries"]):
                         ready.add(parts[1])
                         candidates[parts[1]] = result
             for rel, entry in paths.items():

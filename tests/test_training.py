@@ -79,7 +79,8 @@ def test_accumulation_matches_full_batches_including_unequal_final_microbatch(tm
 @pytest.mark.parametrize("track", ["lora", "full"])
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA integration requires a local NVIDIA GPU"))])
-def test_real_tiny_architectures_and_deferred_spectra(family, track, device, monkeypatch, tmp_path):
+def test_real_tiny_architectures_and_deferred_spectra(family, track, device, monkeypatch, tmp_path,
+                                                    legacy_projection_copy=False):
     from transformers import (LlamaConfig, LlamaForCausalLM, Qwen2Config,
                               Qwen2ForCausalLM, GraniteConfig, GraniteForCausalLM)
     classes = {"llama": (LlamaConfig, LlamaForCausalLM), "qwen2": (Qwen2Config, Qwen2ForCausalLM),
@@ -104,8 +105,15 @@ def test_real_tiny_architectures_and_deferred_spectra(family, track, device, mon
     optimizer = "adamw8bit" if device == "cuda" and track == "full" else "adamw"
     run = config.RunSpec(mspec.key, track, 4 if track == "lora" else None, .001, 42,
                          mode="smoke", train_samples=18, epochs=1, optimizer=optimizer)
-    spec = config.ExperimentSpec(models=[mspec.key], optimizer="standard" if device == "cuda" else "adamw")
+    spec = config.ExperimentSpec(models=[mspec.key], optimizer="standard" if device == "cuda" else "adamw",
+                                 save_lora_projections=legacy_projection_copy)
     directory = tmp_path / "runs" / run.run_id
+    if track == "lora" and not legacy_projection_copy:
+        # A rerun into an older dual-export directory must not leave stale .pt
+        # files shadowing the newly saved adapter-only boundary.
+        stale = directory / "checkpoints" / "task1_rte" / "projections.pt"
+        stale.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"stale_previous_attempt": True}, stale)
     old_overwrite = torch.__future__.get_overwrite_module_params_on_conversion()
     if device == "cpu" and family == "qwen2" and track == "lora":
         # Reproduce device-conversion implementations that replace Parameters.
@@ -121,8 +129,9 @@ def test_real_tiny_architectures_and_deferred_spectra(family, track, device, mon
     assert not (directory / "resume.pt").exists()
     assert result["intruder_status"] == "pending_cpu"
     if track == "lora":
-        checkpoint = directory / result["boundaries"][0]["path"] / "projections.pt"
-        factors = torch.load(checkpoint, map_location="cpu", weights_only=True)["matrices"]
+        from rank_suite.checkpoints import load_boundary_projections
+        assert bool(list(directory.rglob("projections.pt"))) == legacy_projection_copy
+        factors = load_boundary_projections(directory, result, result["boundaries"][0])["matrices"]
         assert any(torch.count_nonzero(value["B"]) > 0 for value in factors.values())
     from rank_suite.intruder import analyze_intruders
     assert analyze_intruders(tmp_path, threads=1)["analyzed_runs"] == 1
@@ -145,6 +154,11 @@ def test_real_tiny_architectures_and_deferred_spectra(family, track, device, mon
         plots = measurement_figures(metrics.results_dataframe(loaded), loaded, tmp_path)
         assert len(plots) == 3
         assert all((tmp_path / name).stat().st_size > 1000 for name in plots)
+
+
+def test_optional_dual_lora_exports_support_cpu_spectra(monkeypatch, tmp_path):
+    test_real_tiny_architectures_and_deferred_spectra("qwen2", "lora", "cpu", monkeypatch,
+                                                    tmp_path, legacy_projection_copy=True)
 
 
 def test_interrupted_run_resumes_identical_predictions(monkeypatch, tmp_path):
@@ -181,11 +195,11 @@ def test_interrupted_run_resumes_identical_predictions(monkeypatch, tmp_path):
             ref = np.load(tmp_path / "reference" / "runs" / run.run_id / rel)
             got = np.load(tmp_path / "resumed" / "runs" / run.run_id / rel)
             np.testing.assert_array_equal(got["predictions"], ref["predictions"])
-        rel = Path(boundary["path"]) / "projections.pt"
-        ref = torch.load(tmp_path / "reference" / "runs" / run.run_id / rel,
-                         map_location="cpu", weights_only=True)["matrices"]
-        got = torch.load(tmp_path / "resumed" / "runs" / run.run_id / rel,
-                         map_location="cpu", weights_only=True)["matrices"]
+        from rank_suite.checkpoints import load_boundary_projections
+        ref = load_boundary_projections(tmp_path / "reference" / "runs" / run.run_id,
+                                        expected, boundary)["matrices"]
+        got = load_boundary_projections(tmp_path / "resumed" / "runs" / run.run_id,
+                                        actual, boundary)["matrices"]
         for name in ref:
             for factor in ("A", "B"):
                 torch.testing.assert_close(got[name][factor], ref[name][factor], atol=0, rtol=0)

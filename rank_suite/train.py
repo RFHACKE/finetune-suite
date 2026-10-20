@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 
 from . import config, metrics, utils
+from .checkpoints import FORMAT, STORAGE_NAME, write_adapter_manifest
 from .data import make_loader
 from .intruder import export_base_projections, export_boundary_projections, save_torch
 from .model_utils import (backbone_transformer, forward_logits, load_backbone,
@@ -311,11 +312,18 @@ def _execute(run, run_dir, data, tokenizer, mspec, experiment, protocol_sha, har
         export_start = time.monotonic()
         boundary = {"task": key, "path": str(ckpt.relative_to(run_dir))}
         if not calibration:
-            boundary["projections_sha256"] = export_boundary_projections(
-                trained_model, run.track, ckpt / "projections.pt", identity)
+            if run.track != "lora" or experiment.save_lora_projections:
+                boundary["projections_sha256"] = export_boundary_projections(
+                    trained_model, run.track, ckpt / "projections.pt", identity)
             save_torch(ckpt / "heads.pt", [h.state_dict() for h in heads])
             if run.track == "lora":
                 trained_model.save_pretrained(ckpt, safe_serialization=True)
+                storage = write_adapter_manifest(ckpt, identity, boundary.get("projections_sha256"))
+                boundary.update(projection_storage=FORMAT, adapter_factors_sha256=storage["factors_sha256"])
+                if not experiment.save_lora_projections:
+                    # A forced/restarted boundary may retain a snapshot from an
+                    # earlier attempt. The newly exported adapter supersedes it.
+                    (ckpt / "projections.pt").unlink(missing_ok=True)
             elif experiment.save_full_weights:
                 save_torch(ckpt / "full_weights.pt", trained_model.state_dict())
         boundaries.append(boundary)
@@ -339,7 +347,7 @@ def _execute(run, run_dir, data, tokenizer, mspec, experiment, protocol_sha, har
             del weights
     run_metrics = metrics.compute_run_metrics(A, list(run.task_keys))
     sizes = {str(p.relative_to(run_dir)): p.stat().st_size
-             for p in (run_dir / "checkpoints").rglob("*") if p.is_file()}
+             for p in (run_dir / "checkpoints").rglob("*") if p.is_file() and p.name != STORAGE_NAME}
     result = {
         "status": "completed", "run_id": run.run_id, "run_identity": identity,
         "protocol_sha256": protocol_sha, "mode": run.mode,

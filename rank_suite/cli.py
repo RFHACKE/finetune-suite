@@ -69,6 +69,8 @@ def _add_run(p):
     p.add_argument("--eval-batch", type=int, default=config.EVAL_BATCH)
     p.add_argument("--deterministic", action="store_true", help="strict deterministic algorithms; slower")
     p.add_argument("--save-full-weights", action="store_true", help="also retain every full model boundary (large)")
+    p.add_argument("--save-lora-projections", action="store_true",
+                   help="also save redundant LoRA projections.pt; adapters alone support CPU spectra")
     p.add_argument("--force", action="store_true", help="explicitly replace completed runs")
     p.add_argument("--keep-going", action="store_true", help="continue after run failure (default: fail fast)")
     p.add_argument("--num-shards", type=int, default=1)
@@ -89,6 +91,7 @@ def _make_spec(args):
         output_dir=args.output, force=args.force, deterministic=args.deterministic,
         optimizer=args.optimizer, micro_batch=args.micro_batch, accum=args.accum,
         eval_batch=args.eval_batch, save_full_weights=args.save_full_weights,
+        save_lora_projections=args.save_lora_projections,
         num_shards=args.num_shards, shard_index=args.shard_index,
         hourly_rate=args.hourly_rate, budget=args.budget, reserve=args.reserve,
         max_hours=args.max_hours, fail_fast=not args.keep_going,
@@ -139,6 +142,11 @@ def _build_parser():
     _add_models(s)
     s.add_argument("--threads", type=int, default=4)
     s.add_argument("--solver", choices=("eigh", "svd"), default="eigh")
+    s = sub.add_parser("checkpoints", help="verify, compact or reconstruct LoRA checkpoints on CPU")
+    s.add_argument("action", choices=("verify", "prune", "restore"))
+    s.add_argument("--output", nargs="+", default=["results"], help="one or more cohort directories")
+    s.add_argument("--run-id", nargs="+", help="restrict to these completed LoRA run IDs")
+    s.add_argument("--tasks", nargs="+", choices=config.TASK_KEYS, help="restrict task boundaries")
     s = sub.add_parser("analyze", help="generate tables, figures and completeness audit on CPU")
     s.add_argument("--output", default="results")
     s.add_argument("--mode", choices=("main", "smoke"), default="main")
@@ -185,6 +193,9 @@ def main(argv=None):
         elif args.command == "intruders":
             from .intruder import analyze_intruders
             print(analyze_intruders(args.output, _models(args.models), args.threads, args.solver))
+        elif args.command == "checkpoints":
+            from .checkpoints import maintain_checkpoints
+            print(json.dumps(maintain_checkpoints(args.output, args.action, args.run_id, args.tasks), indent=2))
         elif args.command == "analyze":
             from .analysis import run_analysis
             print(run_analysis(Path(args.output), mode=args.mode))

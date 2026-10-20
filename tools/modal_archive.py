@@ -1,8 +1,7 @@
 """Lossless, CPU-only packaging of completed runs for faster result transfer.
 
-Only immutable, size/checksum-verified completed checkpoints are archived.
-The long zstd window deduplicates repeated adapter arrays across the normal
-safetensors/projection exports without changing either exported file.
+Only size/checksum-verified completed checkpoints are archived. Both original
+dual exports and verified adapter-backed compacted checkpoints are supported.
 """
 from __future__ import annotations
 
@@ -15,6 +14,8 @@ import time
 
 import modal
 
+from rank_suite.checkpoints import checkpoint_inventory_errors
+
 RUN = os.environ.get("FYP_MODAL_RUN", "frw-20261018")
 MODELS = ["llama3.2-1b", "qwen2.5-1.5b", "granite3.3-2b", "qwen2.5-3b"]
 app = modal.App("fyp-artifact-packaging", include_source=False)
@@ -22,6 +23,8 @@ volume = modal.Volume.from_name("fyp-finetune-results", version=2)
 vault = modal.Volume.from_name("fyp-finetune-archive", create_if_missing=True)
 image = (modal.Image.debian_slim(python_version="3.11").apt_install("zstd")
          .env({"PYTHONPATH": "/app", "PYTHONUNBUFFERED": "1", "FYP_MODAL_RUN": RUN})
+         .add_local_dir(Path(__file__).resolve().parents[1] / "rank_suite", "/app/rank_suite", copy=True,
+                        ignore=["__pycache__", "*.pyc"])
          .add_local_file(__file__, "/app/modal_archive.py", copy=True))
 
 
@@ -44,13 +47,8 @@ def package_run(model_root, run_dir, archive_root, include_base=False):
     result = json.loads((run_dir / "result.json").read_text())
     if result.get("status") != "completed":
         return False
-    for name, size in result["checkpoint_sizes"].items():
-        path = run_dir / name
-        if not path.is_file() or path.stat().st_size != size:
-            return False  # A volume copy/commit may still be in progress.
-    for boundary in result["boundaries"]:
-        if sha256(run_dir / boundary["path"] / "projections.pt") != boundary["projections_sha256"]:
-            return False
+    if checkpoint_inventory_errors(run_dir, result, verify_hashes=True):
+        return False  # A volume copy/commit may still be in progress.
     if include_base:
         base_files = list((model_root / "cache" / "projections").glob("*/*/base.pt"))
         if len(base_files) != 1:
@@ -81,7 +79,10 @@ def package_run(model_root, run_dir, archive_root, include_base=False):
     payload = {"run_id": run_dir.name, "model": result["model"],
                "protocol_sha256": result["protocol_sha256"], "archive": destination.name,
                "archive_bytes": destination.stat().st_size, "archive_sha256": sha256(destination),
-               "checkpoint_bytes_before_compression": result["checkpoint_total_bytes"],
+               "checkpoint_bytes_before_compression": sum(
+                   p.stat().st_size for p in (run_dir / "checkpoints").rglob("*")
+                   if p.is_file() and not p.name.endswith(".lock")),
+               "original_checkpoint_export_bytes": result["checkpoint_total_bytes"],
                "elapsed_s": time.monotonic() - begin,
                "lossless": True, "includes_base_projections": include_base,
                "omitted": ["obsolete resume.pt", "advisory lock files"]}

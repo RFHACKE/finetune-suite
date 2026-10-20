@@ -14,6 +14,7 @@ import numpy as np
 import torch
 
 from . import config, utils
+from .checkpoints import load_boundary_projections, projection_reference
 from .model_utils import adapted_linear_modules
 from .protocol import digest, file_lock
 
@@ -232,16 +233,13 @@ def analyze_intruders(root, models=None, threads=4, solver="eigh"):
                 for boundary in result["boundaries"]:
                     task = boundary["task"]
                     ckpt = run_dir / boundary["path"]
-                    ppath = ckpt / "projections.pt"
-                    if file_sha256(ppath) != boundary["projections_sha256"]:
-                        raise ValueError(f"Corrupt task-boundary projections: {ppath}")
-                    tuned = torch.load(ppath, map_location="cpu", weights_only=True)
+                    tuned = load_boundary_projections(run_dir, result, boundary)
                     if tuned["identity"] != result["run_identity"]:
                         raise ValueError("Snapshot belongs to a different run")
                     analysis_id = digest({"version": ANALYSIS_VERSION, "solver": solver,
                                           "numerical_stack": numerical_stack,
                                           "base": base_meta["sha256"],
-                                          "boundary": boundary["projections_sha256"]})
+                                          "boundary": projection_reference(boundary)})
                     adir = ckpt / "spectra" / analysis_id
                     cache = utils.load_json(adir / "matrices.json", {})
                     start = time.monotonic()

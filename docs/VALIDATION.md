@@ -72,3 +72,41 @@ The v3 analyzer additionally computes top-21 tuned vectors, update spectra and k
 Absolute leading-vector alignment exceeded 0.9999997 in every case, apart from floating-point rounding at unity. At 2048 square the subset method was about three times faster on this CPU. End-to-end spectral time also includes reference decompositions, matrix reconstruction, checksums and I/O, and varies across hardware and spectra.
 
 Full-study accuracy, optimal LRs, feasible ranks, intruder correlations, GPU-hour estimates and total rental cost require actual main experiments. No values for those outcomes are asserted by this validation record.
+
+## Adapter-backed storage validation — 2026-10-20
+
+The checkpoint-storage update was checked against the downloaded 180-run LoRA
+study, separately from the historical development checks above. All 540
+task-boundary adapter/projection pairs were compared using every tensor byte,
+name, shape, dtype, scaling factor and run identity. All 540 saved classification
+head files were loaded and checked for finite tensors. Hashes of 8,300 smaller
+run evidence files were captured for a before/after preservation check.
+
+The checks detected one damaged local Qwen2.5-3B rank-64/seed-123 final adapter
+and its configuration. Cleanup stopped before any deletion. The original
+exports were recovered from the existing remote volume; every recovered factor
+byte matches the original checksum-verified projection. Damaged copies and
+recovery records remain in the local storage-maintenance evidence directory.
+Training results, predictions, original protocol records and source snapshots
+were not rewritten by that repair.
+
+Eight real CPU reconstruction round trips cover every model at rank 256 and
+rank 1024. A temporary compacted copy of a real three-task sequence also passed
+the normal CPU intruder reader with identical cached counts and historical
+analysis IDs. The real study's spectral metrics were not recomputed or replaced
+by synthetic measurements.
+
+Automated coverage includes native adapter-only training and deferred spectra
+on tiny Llama/Qwen/Granite models, interrupted-task prediction/factor equality,
+optional dual exports, stale-copy cleanup on a restarted boundary, bit-exact
+restoration, repeated pruning, missing manifests, corrupt retained factors,
+wrong identities, unsupported adapter variants, busy-run locks, and aborting
+before deletion when any selected pair fails. Local archive and downloader
+tests cover compacted checkpoints and skipping intentionally removed duplicates;
+cloud calls are mocked. Existing full-FT snapshots remain supported. CUDA-only
+integration checks remain skipped on this CPU host.
+
+The new commands and all their options are documented in
+[checkpoint storage](CHECKPOINT_STORAGE.md) and [usage](usage.md). Maintenance
+records are written under each local cohort's `execution/checkpoint-storage/`.
+This update launches no training jobs and does not modify remote archives.

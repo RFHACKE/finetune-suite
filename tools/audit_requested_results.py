@@ -15,6 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from rank_suite import config
+from rank_suite.checkpoints import checkpoint_inventory_errors, validate_boundary_storage
 from rank_suite.metrics import compute_run_metrics
 from rank_suite.protocol import digest
 
@@ -38,6 +39,8 @@ def audit(root):
     labels, data_hashes, base_checks = {}, {}, {}
     spectra = 0
     checkpoint_bytes = 0
+    adapter_backed_boundaries = 0
+    retained_checkpoint_bytes = 0
     for path in sorted((root / "runs").glob("*/result.json")):
         result = json.loads(path.read_text())
         if result.get("mode") != "main":
@@ -69,12 +72,16 @@ def audit(root):
                 fingerprint = (data["training_indices_sha256"], data["train_fingerprint"], data["eval_fingerprint"])
                 require(data_hashes.setdefault(key, fingerprint) == fingerprint, "Within-model data selection mismatch")
                 require(result["train_summary"][task]["steps"] == 3 * math.ceil(2490 / 16), "Optimizer step count mismatch")
-            for name, size in result["checkpoint_sizes"].items():
-                require((path.parent / name).stat().st_size == size, "Checkpoint missing or wrong size: " + name)
+            require(not (storage_errors := checkpoint_inventory_errors(path.parent, result)),
+                    "; ".join(storage_errors))
             checkpoint_bytes += result["checkpoint_total_bytes"]
+            retained_checkpoint_bytes += sum(
+                p.stat().st_size for p in (path.parent / "checkpoints").rglob("*")
+                if p.is_file() and not p.name.endswith(".lock"))
             for i, boundary in enumerate(result["boundaries"]):
                 checkpoint = path.parent / boundary["path"]
-                require(sha256(checkpoint / "projections.pt") == boundary["projections_sha256"], "Projection checksum mismatch")
+                storage = validate_boundary_storage(path.parent, result, boundary, verify_hashes=True)
+                adapter_backed_boundaries += storage["format"] != "original_projections"
                 for name in ("adapter_model.safetensors", "adapter_config.json", "heads.pt"):
                     require((checkpoint / name).is_file(), "Missing final export: " + name)
                 for j, task in enumerate(result["task_order"][:i + 1]):
@@ -110,6 +117,9 @@ def audit(root):
             "duplicates": duplicates, "errors": errors, "gradient_spike_flagged_runs": flagged,
             "protocol_sha256": digest(protocol), "scientific_source_sha256": protocol["source_sha256"],
             "checkpoint_bytes": checkpoint_bytes, "verified_pretrained_projection_sha256": base_checks,
+            "checkpoint_bytes_scope": "Historical export inventory; compacted projections need not remain on disk.",
+            "retained_checkpoint_bytes": retained_checkpoint_bytes,
+            "adapter_backed_boundaries": adapter_backed_boundaries,
             "selected_policies": policy}
 
 

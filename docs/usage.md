@@ -125,6 +125,7 @@ Main defaults are ranks `4 8 16 32 64` and seeds `42 123 456 789 1024`. Subsets 
 | `--optimizer adamw` | Optional separate cohort | fp32 AdamW moments in both tracks; needs more VRAM. |
 | `--deterministic` | Off | Requests strict deterministic algorithms; keep the policy fixed within a cohort. |
 | `--save-full-weights` | Off | Also retains full-FT backbone weights at every boundary; substantial disk use. Exact q/v snapshots are always saved. |
+| `--save-lora-projections` | Off | Also saves redundant LoRA `projections.pt` files. Standard adapter exports and storage manifests already support CPU analysis. |
 | `--lora-lrs` / `--full-lrs` | Model defaults above | Explicit sensitivity rates, either common or model-specific. |
 | `--head-lr-multiplier` | Cohort value, otherwise Section 3's LoRA ratio; full FT uses `1` | Positive finite head/backbone LR ratio. An explicit value overrides the selected head ratio and must be fixed before main training. |
 
@@ -228,7 +229,7 @@ Copy the **complete** results directory to persistent storage before ending the 
 ./run.sh analyze --output results
 ```
 
-Spectra use saved projections, require no GPU, and resume per matrix. The default solver is `eigh`. For a direct-SVD cross-check:
+Spectra use saved full-FT projections or verified LoRA adapters, require no GPU, and resume per matrix. The default solver is `eigh`. For a direct-SVD cross-check:
 
 ```bash
 ./run.sh intruders --output results --solver svd --threads 4
@@ -262,7 +263,9 @@ results/
     train_log.jsonl             # step loss, LR, gradient norm
     resume.pt                   # only while a sequence is incomplete
     checkpoints/task*/
-      projections.pt, heads.pt
+      heads.pt
+      projection-storage.json   # LoRA checksums and lossless reconstruction metadata
+      projections.pt           # full FT; optional redundant export for LoRA
       predictions_*.npz         # predicted classes and labels, not logits
       adapter_*                 # LoRA boundaries
       full_weights.pt           # only with --save-full-weights
@@ -280,6 +283,7 @@ results/
 | `./run.sh run [run options]` | Train, evaluate, export. | Yes |
 | `./run.sh run --dry-run [run options]` | Print the plan without running it. | No |
 | `./run.sh intruders [--models ...] [--output ...] [--threads 4] [--solver eigh\|svd]` | Resumable CPU spectra. | No |
+| `./run.sh checkpoints verify\|prune\|restore [--output DIR ...] [--run-id ID ...] [--tasks rte mnli sst2]` | Verify, compact or reconstruct LoRA checkpoints. | No |
 | `./run.sh analyze [--output ...] [--mode main\|smoke]` | Aggregates, figures, completeness audit, report. | No |
 | `./run.sh doctor [--optimizer adamw8bit\|adamw]` | Imports and actual CUDA/bf16/optimizer checks. | Kernel check only |
 | `./run.sh doctor --cpu` | Preparation/analysis dependency checks. | No |
@@ -307,7 +311,7 @@ The launcher defaults `CUDA_VISIBLE_DEVICES` to `0` and `OMP_NUM_THREADS` to `4`
 | GPU-type mismatch | Resume that model on its recorded GPU type or create a separate cohort. |
 | Unknown cost | Finish full-length pilots for the selected model/track groups, then rerun `plan`. |
 | Missing baseline/seeds or empty window | Check completeness and finish missing prescribed runs. A complete study can legitimately yield no feasible rank. |
-| CPU analysis missing projection files | Restore the full output tree, including `cache/projections/`, from the GPU machine. |
+| CPU analysis missing projection files | Keep `cache/projections/` and either original snapshots or verified LoRA adapters/configs/storage manifests. Use `checkpoints restore` only when a physical LoRA `.pt` is needed. |
 
 See [README](../README.md), [the cloud runbook](CLOUD_RUNBOOK.md), [the protocol](PROTOCOL_V2.md), and [the validation record](VALIDATION.md). Legacy `notify.py` and `run_notify.sh` utilities are optional and separately configured; the core workflow does not invoke them.
 
@@ -319,7 +323,7 @@ This reference covers the current parser in `rank_suite/cli.py`. Options are com
 
 ### Help: global and every command
 
-<!-- cli-options: global run plan prepare intruders analyze doctor list-models -->
+<!-- cli-options: global run plan prepare intruders checkpoints analyze doctor list-models -->
 
 | Flag | Value/default | Effect and example |
 |---|---|---|
@@ -352,6 +356,7 @@ Every option in this table is accepted by both commands. `plan` validates config
 | `--eval-batch N` | `32` | Positive integer evaluation batch size. Does not reduce the validation set; smoke retains its separate diagnostic evaluation cap. Changing it requires a new cohort. |
 | `--deterministic` | Off. | Enable strict deterministic PyTorch algorithms. May reduce speed or fail if an operation lacks a deterministic implementation. Use the same setting across a cohort; this does not promise identical results across hardware/software versions. |
 | `--save-full-weights` | Off. | Save each full-FT backbone at every task boundary in addition to always-saved q/v projections and heads. LoRA already saves adapters. Adds substantial disk/I/O use; enabling it later does not retroactively export completed runs. |
+| `--save-lora-projections` | Off. | Also save redundant LoRA `projections.pt` in future runs. By default, exact FP32 factors are read from standard PEFT adapters using their storage manifests. Does not change training or retroactively export completed runs. Full FT always retains its q/v snapshots. |
 | `--force` | Off; completed runs are skipped. | Rerun selected completed configurations and discard their completion/resume markers before restarting. Does not bypass protocol/software compatibility checks and does not mean deleting the entire output directory. Example: `./run.sh run --models qwen2.5-1.5b --ranks 16 --seeds 42 --force`. |
 | `--keep-going` | Off; stop after a run fails. | Continue to subsequent selected runs after a failure. Failures are recorded in `failures-worker-<index>.jsonl`; the batch still exits nonzero if any run failed. It does not automatically repair or retry failed runs. |
 | `--num-shards N` | `1` | Positive integer count of independent GPU workers. Partitioning keeps each model/seed block's ranks and baseline together. This is independent-run scheduling, not distributed training of one model. Start all intended shards to finish the selected grid. |
@@ -401,6 +406,25 @@ Also accepts `-h` and `--help`. It supports CPU preparation and has no `--cpu` o
 | `--solver SOLVER` | `eigh` | Choose `eigh` (float64 Gram eigendecomposition for leading tuned vectors) or `svd` (direct fp32 SVD cross-check). Caches are separated, but active run summaries are replaced; complete a consistent pass. Example: `./run.sh intruders --output results --threads 4 --solver svd`. |
 
 Also accepts `-h` and `--help`. Spectral analysis is CPU-based; there is no `--cpu`, `--mode`, `--force`, rank, epsilon, or top-k CLI option for this command. Protocol constants govern the latter measurements.
+
+### `checkpoints`: every option
+
+<!-- cli-options: checkpoints -->
+
+| Argument or option | Default | Meaning and example |
+|---|---|---|
+| `verify`, `prune`, or `restore` | Required positional action | `verify` checks every selected factor against its original snapshot and writes storage manifests without deleting files. `prune` verifies the entire selected set before removing redundant LoRA `projections.pt`. `restore` materializes compatible snapshots from retained adapters. All run on CPU. |
+| `--output DIR ...` | `results` | One or more cohort roots containing `runs/`. Does not recurse into other cohorts. Example: `--output Finetune-result Finetune-result/large-ranks`. |
+| `--run-id ID ...` | All eligible runs | Restrict to exact completed LoRA run IDs. Unknown/ineligible IDs are errors. Main and smoke LoRA runs are eligible; full FT and calibration are excluded. |
+| `--tasks TASK ...` | All boundaries | Select one or more of `rte`, `mnli`, `sst2`. Example: `--tasks rte` restores/checks only first-task snapshots. |
+| `-h`, `--help` | — | Print this command's help and exit. |
+
+Example: `./run.sh checkpoints restore --output Finetune-result --run-id YOUR_RUN_ID --tasks rte`.
+Omitting filters restores all eligible snapshots and can consume substantial disk space.
+CPU spectral analysis already reads adapter-only checkpoints without writing duplicates.
+Original result/protocol/checksum records stay intact; adjacent manifests attest the retained
+factor values and record a reconstructed file's separate checksum. See
+[checkpoint storage](CHECKPOINT_STORAGE.md) for verification, logs, recovery and download behavior.
 
 ### `analyze`: every option
 
@@ -489,6 +513,7 @@ Accepted option interactions:
 | `--dry-run` | Print the calibration plan and exit. Also available as `plan --test-lr`. |
 | `--num-shards`, `--shard-index` | Must be `1` and `0`: calibration uses one worker. Run the main study across GPUs after calibration. |
 | `--save-full-weights` | No permanent calibration weight exports; this switch applies to main runs. Temporary recovery states are still retained until each calibration sequence completes. |
+| `--save-lora-projections` | No permanent calibration projections; applies only to non-calibration LoRA runs. |
 | `--output` | Cohort root for defaults; evidence goes in its `lr_test/` child. |
 
 Reviewable artifacts:

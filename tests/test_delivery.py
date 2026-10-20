@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 from contextlib import redirect_stdout
 import io
+import itertools
 import json
 from pathlib import Path
 import signal
@@ -242,14 +243,16 @@ class DeliveryTests(unittest.TestCase):
             child.wait = Mock(side_effect=finish)
             def previous_finished(_seconds):
                 (original / "retrieval.json").write_text('{"retrieval_finished":true}')
+            balances = iter(("40.00", "45.90"))
             def command(args, **kwargs):
                 if "billing" in args:
-                    return SimpleNamespace(returncode=0, stdout='{"metered_cost":"45.90"}')
+                    return SimpleNamespace(returncode=0, stdout=json.dumps({"metered_cost": next(balances)}))
                 return SimpleNamespace(returncode=0)
             endpoint = SimpleNamespace(get_web_url=lambda: "https://isolated.modal.run")
             with (patch.object(watcher.subprocess, "run", side_effect=command) as run,
                   patch.object(watcher.subprocess, "Popen", return_value=child) as popen,
                   patch.object(watcher.modal.Function, "from_name", return_value=endpoint),
+                  patch.object(watcher.time, "monotonic", side_effect=itertools.count(0, 300).__next__),
                   patch.object(watcher.time, "sleep", side_effect=previous_finished) as sleep,
                   patch.object(watcher.os, "killpg") as kill):
                 watcher.collect_raw(workspace, root, {"run": "extension"})
@@ -307,12 +310,15 @@ class DeliveryTests(unittest.TestCase):
                   patch.object(watcher.time, "monotonic", side_effect=lambda: clock[0]),
                   patch.object(watcher.time, "sleep", side_effect=lambda s: clock.__setitem__(0, clock[0]+s)),
                   patch.object(watcher.os, "killpg") as kill):
-                watcher.collect_raw(workspace, root, {"run": "extension"})
+                with self.assertRaisesRegex(RuntimeError, "Three transport attempts exhausted"):
+                    watcher.collect_raw(workspace, root, {"run": "extension"})
             self.assertEqual(len(children), 3)
             self.assertEqual(kill.call_count, 3)
             self.assertEqual(partial.read_bytes(), b"saved before retry")
             recorded = json.loads((execution / "download-supervisor.json").read_text())
-            self.assertEqual(recorded["phase"], "deferred")
+            self.assertEqual(recorded["phase"], "error")
+            self.assertIn("Three transport attempts exhausted", recorded["error"])
+            self.assertTrue((execution / "raw-delivery-deferred.json").exists())
             self.assertTrue(json.loads((execution / "raw-delivery-attempt.json").read_text())["stalled"])
 
 

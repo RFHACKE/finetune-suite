@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 
 from rank_suite import config
+from rank_suite.checkpoints import checkpoint_inventory_errors
 
 RANKS = (4, 8, 16, 32, 64, 128, 256)
 
@@ -68,16 +69,13 @@ def export_errors(run_dir, result, expected, protocol):
     sizes = result.get("checkpoint_sizes", {})
     if not sizes:
         errors.append("Missing checkpoint size inventory")
-    for name, size in sizes.items():
-        path = run_dir / name
-        if not path.is_file() or path.stat().st_size != size:
-            errors.append("Missing/wrong-size export: " + name)
+    errors.extend(checkpoint_inventory_errors(run_dir, result))
     boundaries = result.get("boundaries", [])
     if len(boundaries) != 3:
         errors.append("Missing task boundary")
     for i, boundary in enumerate(boundaries):
         checkpoint = run_dir / boundary["path"]
-        required = ["adapter_model.safetensors", "adapter_config.json", "heads.pt", "projections.pt"]
+        required = ["adapter_model.safetensors", "adapter_config.json", "heads.pt"]
         required += [f"predictions_{task}.npz" for task in config.TASK_KEYS[:i + 1]]
         for name in required:
             if not (checkpoint / name).is_file():
