@@ -39,9 +39,9 @@ def load_backbone(m: C.Model):
     return model
 
 
-def wrap_lora(model, rank: int):
+def wrap_lora(model, rank: int, targets=C.LORA_TARGETS):
     from peft import LoraConfig, get_peft_model
-    cfg = LoraConfig(r=rank, lora_alpha=C.LORA_ALPHA, target_modules=list(C.LORA_TARGETS),
+    cfg = LoraConfig(r=rank, lora_alpha=C.LORA_ALPHA, target_modules=list(targets),
                      lora_dropout=C.LORA_DROPOUT, bias="none", task_type="CAUSAL_LM",
                      init_lora_weights=True, use_rslora=False)
     peft_model = get_peft_model(model, cfg)
@@ -51,15 +51,16 @@ def wrap_lora(model, rank: int):
             p.requires_grad_(True)
         else:
             p.requires_grad_(False)
-    n = sum(1 for _, mod in lora_modules(peft_model))
-    if n != 2 * model.config.num_hidden_layers:
+    n = sum(1 for _, mod in lora_modules(peft_model, targets))
+    if n != len(targets) * model.config.num_hidden_layers:
         raise RuntimeError(f"LoRA matched {n} modules")
     return peft_model
 
 
-def lora_modules(model):
+def lora_modules(model, names=C.LORA_TARGETS):
+    """LoRA layers whose module name is in `names` (q/v by default: the spectral reference set)."""
     for name, mod in model.named_modules():
-        if name.split(".")[-1] in C.LORA_TARGETS and hasattr(mod, "lora_A"):
+        if name.split(".")[-1] in names and hasattr(mod, "lora_A"):
             yield name, mod
 
 

@@ -24,6 +24,11 @@ from .model import (count, features, load_backbone, lora_modules, make_heads, pr
 from .spectral import Reference, aggregate, boundary_metrics, full_ft_metrics
 
 
+def targets_for(kind: str):
+    """All-linear LoRA for the *_al extension cohort; q/v everywhere else."""
+    return C.ALL_LINEAR if kind.endswith("_al") else C.LORA_TARGETS
+
+
 def seed_everything(seed: int):
     random.seed(seed)
     np.random.seed(seed % 2**32)
@@ -152,7 +157,7 @@ def run(job: Job, ctx: Context, out_dir: Path, probes: bool = False, save_adapte
     ref = ctx.reference()
     if job.track == "lora":
         base = ctx.base_model()
-        model = wrap_lora(base, job.rank)
+        model = wrap_lora(base, job.rank, targets_for(job.kind))
         initial = None
     else:
         ctx.drop_base()
@@ -246,7 +251,7 @@ def run(job: Job, ctx: Context, out_dir: Path, probes: bool = False, save_adapte
         if job.track == "lora" and save_adapter and status == "completed":
             from safetensors.torch import save_file
             tensors = {}
-            for name, mod in lora_modules(model):
+            for name, mod in lora_modules(model, targets_for(job.kind)):
                 tensors[name + ".lora_A"] = mod.lora_A["default"].weight.detach().to(torch.bfloat16).cpu().contiguous()
                 tensors[name + ".lora_B"] = mod.lora_B["default"].weight.detach().to(torch.bfloat16).cpu().contiguous()
             save_file(tensors, str(out_dir / "adapter_final_bf16.safetensors"))
@@ -266,6 +271,7 @@ def run(job: Job, ctx: Context, out_dir: Path, probes: bool = False, save_adapte
     result = {"status": status, "error": error, "job_id": job.job_id, "spec": job.spec,
               "model_hf": m.hf_id, "revision": m.revision, "order_tasks": list(order),
               "alpha": C.LORA_ALPHA if job.track == "lora" else None,
+              "lora_targets": list(targets_for(job.kind)) if job.track == "lora" else None,
               "scale": (C.LORA_ALPHA / job.rank) if job.track == "lora" else None,
               "head_lr": C.HEAD_LR, "epochs": C.EPOCHS, "batch": C.BATCH, "warmup_frac": C.WARMUP_FRAC,
               "A": A, "NLL": NLL, "probe": P if probes else None, "probe_train": P_train if probes else None,

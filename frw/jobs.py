@@ -46,19 +46,19 @@ def _rank_pos(rank) -> int:
     return COVERAGE.index(rank) if rank in COVERAGE else len(COVERAGE)
 
 
-def tune_jobs(model: str, ranks=C.RANKS, lrs=C.LORA_LR_GRID, seeds=C.TUNE_SEEDS) -> list:
+def tune_jobs(model: str, ranks=C.RANKS, lrs=C.LORA_LR_GRID, seeds=C.TUNE_SEEDS, suffix="") -> list:
     jobs = []
     for si, seed in enumerate(seeds):
         for rank in ranks:
             for lr in lrs:
-                jobs.append(Job("tune", model, "lora", rank, lr, seed, "O1", "holdout",
+                jobs.append(Job("tune" + suffix, model, "lora", rank, lr, seed, "O1", "holdout",
                                 priority=100 + si * 20 + _rank_pos(rank)))
     return jobs
 
 
-def main_jobs(model: str, rank: int, lr: float, seeds=C.MAIN_SEEDS) -> list:
+def main_jobs(model: str, rank: int, lr: float, seeds=C.MAIN_SEEDS, suffix="") -> list:
     # First three seeds before the last two so partial completion keeps n=3 everywhere.
-    return [Job("main", model, "lora", rank, lr, s, "O1", "official",
+    return [Job("main" + suffix, model, "lora", rank, lr, s, "O1", "official",
                 priority=300 + (0 if i < 3 else 30) + _rank_pos(rank))
             for i, s in enumerate(seeds)]
 
@@ -69,6 +69,13 @@ def order_jobs(model: str, rank: int, lr: float) -> list:
     return [Job("order", model, "lora", rank, lr, s, o, "official",
                 priority=500 + 10 * oi + _rank_pos(rank))
             for oi, o in enumerate(("O2", "O3")) for s in C.ORDER_SEEDS]
+
+
+def stab_jobs(model: str, rank: int, selected_lr: float) -> list:
+    """Stability cohort: fresh seeds at the frozen selected LR and at half of it (q/v, O1)."""
+    return [Job("stab", model, "lora", rank, lr, s, "O1", "official",
+                priority=200 + 10 * li + _rank_pos(rank))
+            for li, lr in enumerate((selected_lr, selected_lr / 2)) for s in C.STAB_SEEDS]
 
 
 def full_tune_jobs(model: str, lrs=C.FULL_LR_GRID, seeds=C.TUNE_SEEDS[:1]) -> list:

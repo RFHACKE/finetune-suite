@@ -120,3 +120,31 @@ def test_job_ids_are_stable_and_unique():
     assert len(ids) == len(set(ids)) == len(C.RANKS) * len(C.LORA_LR_GRID) * len(C.TUNE_SEEDS)
     again = J.Job.from_spec(json.loads(json.dumps(jobs[0].spec)))
     assert again.job_id == jobs[0].job_id
+
+
+def test_all_linear_wrap_and_restore(tiny, tmp_path):
+    base = tiny.base_model()
+    before = {k: v.clone() for k, v in base.state_dict().items()}
+    job = J.Job("main_al", "tiny-qwen", "lora", 4, 4e-3, 42, "O1", "official")
+    res = T.run(job, tiny, tmp_path / "al", probes=True, save_adapter=True, log=lambda *a: None)
+    assert res["status"] == "completed" and res["lora_targets"] == list(C.ALL_LINEAR)
+    assert len(res["spectral_summary"][-1]["summary"]["all"]) and \
+        res["spectral_summary"][-1]["summary"]["all"]["n_matrices"] == 2 * 2     # q/v only
+    from safetensors.torch import load_file
+    keys = load_file(str(tmp_path / "al" / "adapter_final_bf16.safetensors"))
+    assert len(keys) == 2 * len(C.ALL_LINEAR) * 2                                  # A and B, 7 targets, 2 layers
+    after = tiny.base.state_dict()
+    assert set(after) == set(before) and all(torch.equal(before[k], after[k]) for k in before)
+    # q/v job after an all-linear job is unaffected
+    res2 = T.run(J.Job("stab", "tiny-qwen", "lora", 4, 4e-3, 42, "O1", "official"), tiny, tmp_path / "s",
+                 log=lambda *a: None)
+    assert res2["lora_targets"] == list(C.LORA_TARGETS)
+
+
+def test_extension_jobs_have_distinct_ids():
+    old = J.main_jobs("qwen2.5-1.5b", 16, 2e-4)
+    al = J.main_jobs("qwen2.5-1.5b", 16, 2e-4, suffix="_al")
+    st = J.stab_jobs("qwen2.5-3b", 256, 4e-4)
+    assert not {j.job_id for j in old} & {j.job_id for j in al}
+    assert len(st) == 10 and {j.lr for j in st} == {4e-4, 2e-4}
+    assert old[0].job_id == J.Job("main", "qwen2.5-1.5b", "lora", 16, 2e-4, 42, "O1", "official").job_id

@@ -45,7 +45,8 @@ def load_runs(root: Path) -> list:
                "tasks": r["order_tasks"], "gpu": r.get("gpu"), "wall_s": r.get("wall_s"),
                "timing": r.get("timing_s"), "trainable_params": r.get("trainable_params"),
                "spectral": r.get("spectral_summary"), "dir": str(f.parent),
-               "account": (f.parent / "account.txt").read_text().strip() if (f.parent / "account.txt").exists() else None}
+               "account": (f.parent / "account.txt").read_text().strip() if (f.parent / "account.txt").exists() else None,
+               "majority": {t: v.get("majority_eval_accuracy") for t, v in (r.get("data") or {}).items()}}
         m = r.get("metrics")
         if m:
             row.update({k: m[k] for k in ("acc_final", "plasticity", "bwt", "forgetting_max", "avg_incremental_acc")})
@@ -71,11 +72,13 @@ def load_runs(root: Path) -> list:
     return rows
 
 
-def load_selections(root: Path) -> dict:
+def load_selections(root: Path, suffix: str = "") -> dict:
+    """LR selections for one cohort: q/v (suffix "") or all-linear ("_al")."""
     out = {}
     for f in (root / "accounts").glob("*/selections/*.json"):
         d = json.loads(f.read_text())
-        out[(d["model"], d["rank"])] = d
+        if d.get("suffix", "") == suffix:
+            out[(d["model"], d["rank"])] = d
     return out
 
 
@@ -959,6 +962,182 @@ def fig_bwt_components(F, summary):
            "Forgetting of each earlier task separately (A_Tj − A_jj) vs rank; mean and 95% CI over seeds.")
 
 
+# ---------------------------------------------------------------------------
+# extension cohorts (docs/PROTOCOL_V4_EXT.md)
+# ---------------------------------------------------------------------------
+def wilson(k, n, z=1.96):
+    if n == 0:
+        return None, None
+    p = k / n
+    den = 1 + z * z / n
+    c = (p + z * z / (2 * n)) / den
+    h = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / den
+    return max(0.0, c - h), min(1.0, c + h)
+
+
+def stability(rows, sel):
+    """E1: failure rates per (model, rank, LR) pooling main seeds with the fresh stability seeds."""
+    from scipy.stats import fisher_exact, norm
+    out = {}
+    for model in ("granite3.3-2b", "qwen2.5-3b"):
+        rs = [r for r in rows if r["model"] == model and r["status"] == "completed" and r["order"] == "O1"
+              and r["kind"] in ("main", "stab") and r["rank"] in C.STAB_RANKS]
+        if not any(r["kind"] == "stab" for r in rs):
+            continue
+        ctrl = [100 * r["acc_final"] for r in rs if r["rank"] == 16
+                and math.isclose(r["lr"], sel.get((model, 16), {}).get("selected_lr", -1), rel_tol=1e-6)]
+        if not ctrl:
+            continue
+        thr = float(np.median(ctrl)) - 10.0
+
+        def failed(r):
+            if 100 * r["acc_final"] < thr:
+                return True
+            return any(100 * r[f"diag_{t}"] < 100 * (r["majority"].get(t) or 0) + 5 for t in r["tasks"])
+        res = {"control_median_acc": float(np.median(ctrl)), "acc_threshold": thr, "cells": {}}
+        for rank in C.STAB_RANKS:
+            s_lr = sel.get((model, rank), {}).get("selected_lr")
+            if s_lr is None:
+                continue
+            for tag, lr in (("selected", s_lr), ("half", s_lr / 2)):
+                cell = [r for r in rs if r["rank"] == rank and math.isclose(r["lr"], lr, rel_tol=1e-6)]
+                if not cell:
+                    continue
+                k = sum(failed(r) for r in cell)
+                ok = [r for r in cell if not failed(r)]
+                lo, hi = wilson(k, len(cell))
+                res["cells"][f"{rank}|{tag}"] = {
+                    "rank": rank, "lr": lr, "lr_tag": tag, "n": len(cell), "failures": k, "rate": k / len(cell),
+                    "wilson95": [lo, hi], "failed_seeds": sorted(r["seed"] for r in cell if failed(r)),
+                    "acc_ok": summarize([100 * r["acc_final"] for r in ok]),
+                    "bwt_ok": summarize([100 * r["bwt"] for r in ok]),
+                    "acc_all": summarize([100 * r["acc_final"] for r in cell])}
+        # Cochran-Armitage trend over log2(rank) at the selected LR
+        cs = [v for v in res["cells"].values() if v["lr_tag"] == "selected"]
+        if len(cs) >= 3:
+            x = np.array([math.log2(v["rank"]) for v in cs])
+            n = np.array([v["n"] for v in cs], float)
+            k = np.array([v["failures"] for v in cs], float)
+            p = k.sum() / n.sum()
+            if 0 < p < 1:
+                tstat = float((k * (x - (n * x).sum() / n.sum())).sum())
+                var = p * (1 - p) * float((n * (x - (n * x).sum() / n.sum()) ** 2).sum())
+                z = tstat / math.sqrt(var)
+                res["trend_selected_lr"] = {"z": z, "p_two_sided": float(2 * norm.sf(abs(z)))}
+            else:
+                res["trend_selected_lr"] = {"z": None, "p_two_sided": 1.0, "note": "no variation in failures"}
+        hi_sel = [v for v in res["cells"].values() if v["rank"] >= 64 and v["lr_tag"] == "selected"]
+        hi_half = [v for v in res["cells"].values() if v["rank"] >= 64 and v["lr_tag"] == "half"]
+        if hi_sel and hi_half:
+            a, b = sum(v["failures"] for v in hi_sel), sum(v["n"] for v in hi_sel)
+            c, d = sum(v["failures"] for v in hi_half), sum(v["n"] for v in hi_half)
+            odds, pv = fisher_exact([[a, b - a], [c, d - c]])
+            res["lr_effect_rank_ge64"] = {"selected": [a, b], "half": [c, d], "fisher_p": float(pv)}
+        feasible = []
+        for rank in C.STAB_RANKS:
+            for tag in ("selected", "half"):
+                v = res["cells"].get(f"{rank}|{tag}")
+                c16 = res["cells"].get(f"16|{tag}")
+                if v and c16 and v["rate"] <= 0.1 and v["acc_ok"]["mean"] is not None \
+                        and v["acc_ok"]["mean"] >= c16["acc_ok"]["mean"] - 2:
+                    feasible.append({"rank": rank, "lr_tag": tag, "lr": v["lr"]})
+        res["reinstated_feasible"] = feasible
+        out[model] = res
+    return out
+
+
+def all_linear(rows):
+    """E2: all-linear summary plus paired (same seed) all-linear minus q/v differences."""
+    s_al = main_summary(rows, kind="main_al")
+    if not s_al:
+        return {}, {}
+    w_al = windows(s_al)
+    qv = {(r["model"], r["rank"], r["seed"]): r for r in rows if r["kind"] == "main" and r["status"] == "completed"}
+    paired = {}
+    for model in C.MODEL_ORDER:
+        ps = {}
+        for r in sorted({x["rank"] for x in rows if x["kind"] == "main_al" and x["model"] == model}):
+            for metric in ("acc_final", "plasticity", "bwt", "probe_bwt"):
+                d = [100 * (a[metric] - qv[(model, r, a["seed"])][metric]) for a in rows
+                     if a["kind"] == "main_al" and a["model"] == model and a["rank"] == r and a["status"] == "completed"
+                     and (model, r, a["seed"]) in qv and a.get(metric) is not None
+                     and qv[(model, r, a["seed"])].get(metric) is not None]
+                m, lo, hi = boot_ci(d)
+                ps.setdefault(r, {})[metric] = {"n": len(d), "mean_diff_pp": m, "ci95": [lo, hi],
+                                                "p_signflip": signflip_p(d) if d else None}
+        if ps:
+            adj = holm({r: v["acc_final"]["p_signflip"] for r, v in ps.items()})
+            for r in ps:
+                ps[r]["acc_final"]["p_holm"] = adj.get(r)
+            paired[model] = ps
+    return {"summary": s_al, "windows": w_al}, paired
+
+
+def fig_stability(F, stab):
+    if not stab:
+        return
+    plt = _plt()
+    fig, axes = plt.subplots(2, len(stab), figsize=(6.5 * len(stab), 6.4), squeeze=False)
+    data = {}
+    for col, (model, res) in enumerate(stab.items()):
+        for row, key in enumerate(("rate", "acc_ok")):
+            ax = axes[row, col]
+            for li, tag in enumerate(("selected", "half")):
+                cells = sorted((v for v in res["cells"].values() if v["lr_tag"] == tag), key=lambda v: v["rank"])
+                if not cells:
+                    continue
+                x = [v["rank"] for v in cells]
+                if key == "rate":
+                    y = [100 * v["rate"] for v in cells]
+                    lo = [100 * v["wilson95"][0] for v in cells]
+                    hi = [100 * v["wilson95"][1] for v in cells]
+                else:
+                    y = [v["acc_ok"]["mean"] for v in cells]
+                    lo = [v["acc_ok"]["ci95"][0] if v["acc_ok"]["ci95"][0] is not None else v["acc_ok"]["mean"] for v in cells]
+                    hi = [v["acc_ok"]["ci95"][1] if v["acc_ok"]["ci95"][1] is not None else v["acc_ok"]["mean"] for v in cells]
+                lab = "selected LR" if tag == "selected" else "half the selected LR"
+                ax.plot(x, y, marker="o", color=SERIES[li], label=lab)
+                ax.fill_between(x, lo, hi, color=SERIES[li], alpha=0.15, lw=0)
+                data.setdefault(model, {}).setdefault(key, {})[tag] = {"rank": x, "value": y, "low": lo, "high": hi}
+                _rank_axis(ax, x)
+            ax.set_title(C.MODELS[model].label)
+        axes[0, col].set_ylabel("failed runs (%) with Wilson 95% CI")
+        axes[1, col].set_ylabel("ACC of non-failed runs (%)")
+    axes[0, 0].legend(fontsize=7)
+    fig.tight_layout(h_pad=2.0)
+    F.save(fig, "ext_stability_failure_rate", data,
+           "E1: share of runs that failed (pre-registered definition) per rank at the selected LR (n=10) and "
+           "at half of it (n=5), and ACC of the runs that did not fail.")
+
+
+def fig_all_linear(F, al_sum, rows):
+    s_al = al_sum.get("summary") if al_sum else None
+    if not s_al:
+        return
+    plt = _plt()
+    s_qv = main_summary(rows)
+    models = [m for m in C.MODEL_ORDER if any(v["model"] == m for v in s_al.values())]
+    fig, axes = plt.subplots(3, len(models), figsize=(6.5 * len(models), 9), squeeze=False)
+    data = {}
+    for col, model in enumerate(models):
+        a = {v["rank"]: v for v in s_al.values() if v["model"] == model}
+        q = {v["rank"]: v for v in s_qv.values() if v["model"] == model}
+        for row, key in enumerate(("acc_final", "plasticity", "bwt")):
+            ax = axes[row, col]
+            data.setdefault(model, {})[key] = {
+                "q/v": _band(ax, sorted(q), q, key, SERIES[0], "q/v LoRA"),
+                "all-linear": _band(ax, sorted(a), a, key, SERIES[1], "all-linear LoRA")}
+            _rank_axis(ax, sorted(set(q) | set(a)))
+            if row == 0:
+                ax.set_title(C.MODELS[model].label)
+        axes[0, col].set_ylabel("ACC (%)")
+        axes[1, col].set_ylabel("plasticity (%)")
+        axes[2, col].set_ylabel("BWT (pp)")
+    axes[0, 0].legend(fontsize=7)
+    F.save(fig, "ext_all_linear_vs_qv", data,
+           "E2: all-linear LoRA vs q/v LoRA at each rank's own selected LR (mean and 95% CI over the same 5 seeds).")
+
+
 def fig_cost(F, rows):
     plt = _plt()
     by = {}
@@ -1143,6 +1322,14 @@ def main(argv=None):
     dump("trends.json", trend)
     dump("spectral_association.json", assoc)
     dump("order_robustness.json", {"summaries": orders, "windows": order_windows})
+    stab = stability(rows, sel)
+    al_sum, al_paired = all_linear(rows)
+    if stab:
+        dump("ext_stability.json", stab)
+    if al_sum:
+        dump("ext_all_linear.json", {**al_sum, "paired_all_linear_minus_qv": al_paired,
+                                     "selected_lr": [{**v, "model": m, "rank": r} for (m, r), v in
+                                                     sorted(load_selections(root, "_al").items())]})
 
     F = Fig(out / "figures")
     assoc_rows = [r for r in rows if r["kind"] == "main" and r["status"] == "completed"
@@ -1153,7 +1340,8 @@ def main(argv=None):
                      (fig_spectral, (F, summary, assoc_rows)), (fig_probe, (F, summary)),
                      (fig_orders, (F, rows, sel)), (fig_seeds, (F, rows)), (fig_loss_curves, (F, rows, root)),
                      (fig_v3_vs_v4, (F, v3, summary)), (fig_window_map, (F, wins)), (fig_paired_forest, (F, tests)),
-                     (fig_bwt_components, (F, summary)), (fig_cost, (F, rows))):
+                     (fig_bwt_components, (F, summary)), (fig_stability, (F, stab)),
+                     (fig_all_linear, (F, al_sum, rows)), (fig_cost, (F, rows))):
         try:
             fn(*args)
         except Exception as exc:  # noqa: BLE001 - one bad figure must not block the rest

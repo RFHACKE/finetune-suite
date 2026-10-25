@@ -115,8 +115,12 @@ def _job_cost(job: dict, cfg: dict) -> float:
     base_s = est.get(key, 900.0)
     r = job.get("rank") or 0
     mult = 1.0 + (0.6 if r >= 1024 else 0.3 if r >= 512 else 0.12 if r >= 256 else 0.0)
-    if job.get("kind") == "main":
+    if job.get("kind") in ("main", "main_al"):
         mult *= 1.0 + cfg.get("probe_overhead", 0.25)
+    if job.get("kind") == "stab":
+        mult *= cfg.get("stab_factor", 0.75)          # official split without probes/adapters
+    if str(job.get("kind", "")).endswith("_al"):
+        mult *= 1.0 + cfg.get("all_linear_overhead", 0.6)
     return base_s * mult * WORKER_RATE_S
 
 
@@ -165,10 +169,11 @@ def advance(log=print):
     created = 0
     for pair in cfg.get("pairs", []):
         model, rank = pair["model"], pair["rank"]
-        sel_path = BASE / "selections" / f"{model}__r{rank}.json"
+        suffix = pair.get("suffix", "")
+        sel_path = BASE / "selections" / f"{model}__r{rank}{suffix}.json"
         if sel_path.exists():
             continue
-        tunes = [d for d in queue.values() if d["spec"]["kind"] == "tune" and d["spec"]["model"] == model
+        tunes = [d for d in queue.values() if d["spec"]["kind"] == "tune" + suffix and d["spec"]["model"] == model
                  and d["spec"]["rank"] == rank]
         by_lr = {}
         for d in tunes:
@@ -182,17 +187,18 @@ def advance(log=print):
             continue
         status, lr, extra, table = J.select_lr(by_lr, len(C.TUNE_SEEDS), C.LORA_LR_MIN, C.LORA_LR_MAX)
         if status == "extend":
-            for job in J.tune_jobs(model, ranks=[rank], lrs=[extra]):
+            for job in J.tune_jobs(model, ranks=[rank], lrs=[extra], suffix=suffix):
                 if job.job_id not in queue:
                     _enqueue(job)
                     created += 1
         elif status == "selected":
-            new = J.main_jobs(model, rank, lr) + (J.order_jobs(model, rank, lr) if cfg.get("orders", True) else [])
+            new = J.main_jobs(model, rank, lr, suffix=suffix) + (
+                J.order_jobs(model, rank, lr) if cfg.get("orders", True) and not suffix else [])
             for job in new:
                 if job.job_id not in queue:
                     _enqueue(job)
                     created += 1
-            _save(sel_path, {"model": model, "rank": rank, "selected_lr": lr,
+            _save(sel_path, {"model": model, "rank": rank, "suffix": suffix, "selected_lr": lr,
                              "table": {str(k): v for k, v in table.items()},
                              "rule": "argmax mean final-row holdout accuracy over tuning seeds; ties->lower LR;"
                                      " edge winners extended by factor 2", "ts": time.time()})
@@ -304,7 +310,8 @@ def worker(slot: int):
                     torch.cuda.empty_cache()
                     ctx = T.Context(job.model, torch.device("cuda"), ref_dir=BASE / "refs")
                 out = BASE / "runs" / job.job_id
-                res = T.run(job, ctx, out, probes=(job.kind == "main"), save_adapter=(job.kind == "main"),
+                res = T.run(job, ctx, out, probes=job.kind in ("main", "main_al"),
+                            save_adapter=job.kind in ("main", "main_al"),
                             log=log)
                 res["worker"] = {"uid": uid, "attempt": attempt, "gpu_type": GPU,
                                  "job_wall_s": time.time() - t_job}
@@ -561,7 +568,7 @@ def control(action: str, payload: dict | None = None):
     elif action == "pending":
         rows = []
         for d in _candidates():
-            if d["spec"]["kind"] in ("main", "order") and not _held(d["job_id"]):
+            if d["spec"]["kind"] in ("main", "order", "stab", "main_al") and not _held(d["job_id"]):
                 rows.append({"job_id": d["job_id"], "spec": d["spec"], "priority": d["priority"],
                              "est_usd": _job_cost(d["spec"], _config())})
         return {"pending": rows, "spend_estimate_usd": _spend_estimate(),

@@ -169,7 +169,7 @@ def volume_pending(n) -> list:
             continue
         d = json.loads(_read(vol, e.path))
         spec = d["spec"]
-        if spec["kind"] not in ("main", "order"):
+        if spec["kind"] not in ("main", "order", "stab", "main_al"):
             continue
         secs = JOB_SECONDS.get(f"{spec['model']}|{spec['split']}", 900) * 1.6
         rows.append({"job_id": job_id, "spec": spec, "priority": d["priority"], "est_usd": secs * RATE_S})
@@ -289,7 +289,7 @@ def collect(accts, adapters=False):
 # rebalancing: reported jobs (selection already frozen) move from an account that
 # hit its admission cap to the account with the most headroom
 # ---------------------------------------------------------------------------
-def rebalance(st, cap=26.0, margin=1.5):
+def rebalance(st, cap=27.0, margin=1.5):
     info = {}
     for n in st["accounts"]:
         try:

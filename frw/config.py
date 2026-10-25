@@ -67,6 +67,8 @@ EVAL_BATCH = 64
 # LoRA parameterisation: fixed alpha, scale alpha/r (PEFT default semantics).
 LORA_ALPHA = 32
 LORA_TARGETS = ("q_proj", "v_proj")
+# Extension cohort (2026-10-25): LoRA on every linear layer of every block.
+ALL_LINEAR = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
 LORA_DROPOUT = 0.0
 
 RANKS = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024)
@@ -79,6 +81,10 @@ TUNE_SEEDS = (11, 22)                          # LR search only (holdout evaluat
 MAIN_SEEDS = (42, 123, 456, 789, 1024)         # reported results (official validation)
 ORDER_SEEDS = (42, 123, 456)                   # task-order robustness cohort
 ORDER_RANKS = (1, 4, 16, 64, 256, 1024)
+# Extension cohorts (pre-registered in docs/PROTOCOL_V4_EXT.md before launch).
+STAB_SEEDS = (2024, 3033, 4044, 5055, 6066)        # fresh seeds, never used for selection
+STAB_RANKS = (16, 64, 128, 256, 512, 1024)
+AL_RANKS = (4, 16, 64, 256)
 
 INTRUDER_K = 10
 INTRUDER_EPS = (0.5, 0.6, 0.7, 0.8, 0.9)
