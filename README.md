@@ -1,5 +1,15 @@
 # Feasible Rank Window — experiment suite
 
+> **Current study: protocol frw-v4 (LoRA only, 2026-10-25).** The v3 cohorts used α = 2r with
+> one learning rate per model, which made ranks ≥ 128 (and some seeds at 32/64) fail to learn, so
+> their low forgetting was an artifact. v4 fixes α = 32 (scale α/r), searches the learning rate
+> for every rank on a training holdout, reports five fresh seeds on official validation, and adds
+> task-order, linear-probe and spectral analyses. Start here:
+> [protocol](docs/PROTOCOL_V4.md) · [literature basis](docs/LITERATURE_V4.md) ·
+> [runbook (six Modal accounts)](docs/RUNBOOK_V4.md) · results in `results-v4/analysis/`.
+> Code: `frw/` (training, analysis, Modal app) and `tools/frw_*.py` (launch, supervisor).
+> The `rank_suite/` package below documents the v3 cohorts and is kept for reproducing them.
+
 A reproducible study of LoRA rank and sequential classification forgetting in four **fixed base models**: Llama-3.2-1B, Qwen2.5-1.5B, Granite-3.3-2B, and Qwen2.5-3B. The original proposal and subsequent methodology were reviewed against primary literature. Model selection is unchanged; the current [v3 amendment](docs/PROTOCOL_V3.md) adds LR/head calibration, per-task learning/retention gates and update/subspace diagnostics to the [v2 design](docs/PROTOCOL_V2.md).
 
 The main study is **120 full sequences**: four models × (five LoRA ranks + one non-embedding full-FT baseline) × five seeds. Every sequence learns RTE → MNLI Matched → SST-2 with 2,490 training examples/task, three epochs/task, effective batch 16 and full official validation. All ranks, seeds and evaluation data are preserved for cost efficiency.
