@@ -117,6 +117,9 @@ def _job_cost(job: dict, cfg: dict) -> float:
     mult = 1.0 + (0.6 if r >= 1024 else 0.3 if r >= 512 else 0.12 if r >= 256 else 0.0)
     if job.get("kind") in ("main", "main_al"):
         mult *= 1.0 + cfg.get("probe_overhead", 0.25)
+    kind = str(job.get("kind", ""))
+    if kind.startswith("ep") and "_" in kind:
+        mult *= 0.75 * (0.3 + 0.7 * int(kind[2:kind.index("_")]) / 3)   # no probes; scales with epochs
     if job.get("kind") == "stab":
         mult *= cfg.get("stab_factor", 0.75)          # official split without probes/adapters
     if str(job.get("kind", "")).endswith("_al"):
@@ -568,7 +571,8 @@ def control(action: str, payload: dict | None = None):
     elif action == "pending":
         rows = []
         for d in _candidates():
-            if d["spec"]["kind"] in ("main", "order", "stab", "main_al") and not _held(d["job_id"]):
+            if (d["spec"]["kind"] in ("main", "order", "stab", "main_al") or d["spec"]["kind"].startswith("ep")) \
+                    and not _held(d["job_id"]):
                 rows.append({"job_id": d["job_id"], "spec": d["spec"], "priority": d["priority"],
                              "est_usd": _job_cost(d["spec"], _config())})
         return {"pending": rows, "spend_estimate_usd": _spend_estimate(),

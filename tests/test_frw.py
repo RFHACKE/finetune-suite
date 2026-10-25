@@ -148,3 +148,14 @@ def test_extension_jobs_have_distinct_ids():
     assert not {j.job_id for j in old} & {j.job_id for j in al}
     assert len(st) == 10 and {j.lr for j in st} == {4e-4, 2e-4}
     assert old[0].job_id == J.Job("main", "qwen2.5-1.5b", "lora", 16, 2e-4, 42, "O1", "official").job_id
+
+
+def test_epoch_cohort_trains_requested_epochs(tiny, tmp_path):
+    import gzip
+    job = J.Job("ep2_al", "tiny-qwen", "lora", 4, 4e-3, 42, "O1", "official")
+    res = T.run(job, tiny, tmp_path / "e", log=lambda *a: None)
+    assert res["epochs"] == 2 and res["lora_targets"] == list(C.ALL_LINEAR)
+    with gzip.open(tmp_path / "e" / "train_log.jsonl.gz", "rt") as fh:
+        epochs = {json.loads(x)["epoch"] for x in fh}
+    assert epochs == {0, 1}
+    assert T.epochs_for("main_al") == C.EPOCHS == 3 and T.epochs_for("ep5_al") == 5

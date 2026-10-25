@@ -29,6 +29,13 @@ def targets_for(kind: str):
     return C.ALL_LINEAR if kind.endswith("_al") else C.LORA_TARGETS
 
 
+def epochs_for(kind: str) -> int:
+    """Epoch-budget cohort kinds look like 'ep2_al'; every other kind uses the protocol's 3 epochs."""
+    if kind.startswith("ep") and "_" in kind:
+        return int(kind[2:kind.index("_")])
+    return C.EPOCHS
+
+
 def seed_everything(seed: int):
     random.seed(seed)
     np.random.seed(seed % 2**32)
@@ -191,7 +198,7 @@ def run(job: Job, ctx: Context, out_dir: Path, probes: bool = False, save_adapte
             opt = _optimizer(groups, job.track)
             n = len(td.train)
             steps_per_epoch = math.ceil(n / C.BATCH)
-            total = steps_per_epoch * C.EPOCHS
+            total = steps_per_epoch * epochs_for(job.kind)
             warm = math.ceil(C.WARMUP_FRAC * total)
             from transformers import get_cosine_schedule_with_warmup
             sched = get_cosine_schedule_with_warmup(opt, warm, total)
@@ -199,7 +206,7 @@ def run(job: Job, ctx: Context, out_dir: Path, probes: bool = False, save_adapte
             step = 0
             ts = time.time()
             params = base_params + list(heads[i].parameters())
-            for ep in range(C.EPOCHS):
+            for ep in range(epochs_for(job.kind)):
                 seed_e = C.shuffle_seed(job.seed, i) * 10 + ep
                 for ids, mask, labels, _ in batches(td.train, C.BATCH, pad, shuffle_seed=seed_e):
                     loss_val = 0.0
@@ -273,7 +280,7 @@ def run(job: Job, ctx: Context, out_dir: Path, probes: bool = False, save_adapte
               "alpha": C.LORA_ALPHA if job.track == "lora" else None,
               "lora_targets": list(targets_for(job.kind)) if job.track == "lora" else None,
               "scale": (C.LORA_ALPHA / job.rank) if job.track == "lora" else None,
-              "head_lr": C.HEAD_LR, "epochs": C.EPOCHS, "batch": C.BATCH, "warmup_frac": C.WARMUP_FRAC,
+              "head_lr": C.HEAD_LR, "epochs": epochs_for(job.kind), "batch": C.BATCH, "warmup_frac": C.WARMUP_FRAC,
               "A": A, "NLL": NLL, "probe": P if probes else None, "probe_train": P_train if probes else None,
               "metrics": metrics(A) if status == "completed" else None,
               "data": {k: data[k].provenance for k in order},

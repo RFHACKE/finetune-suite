@@ -1138,6 +1138,66 @@ def fig_all_linear(F, al_sum, rows):
            "E2: all-linear LoRA vs q/v LoRA at each rank's own selected LR (mean and 95% CI over the same 5 seeds).")
 
 
+def epoch_budget(rows):
+    """E3: ACC/plasticity/BWT per epoch budget, paired (same seed) against 3 epochs."""
+    out = {}
+    for model in C.MODEL_ORDER:
+        rs = [r for r in rows if r["model"] == model and r["kind"].startswith("ep") and r["kind"].endswith("_al")
+              and r["status"] == "completed"]
+        if not rs:
+            continue
+        by = {}
+        for r in rs:
+            by.setdefault(int(r["kind"][2:r["kind"].index("_")]), {})[r["seed"]] = r
+        res = {"rank": rs[0]["rank"], "lr": rs[0]["lr"], "budgets": {}, "paired_vs_3": {}}
+        for e in sorted(by):
+            res["budgets"][e] = {k: summarize([100 * x[k] for x in by[e].values()])
+                                 for k in ("acc_final", "plasticity", "bwt", "forgetting_max")}
+        ps = {}
+        if 3 in by:
+            for e in sorted(by):
+                if e == 3:
+                    continue
+                common = sorted(set(by[e]) & set(by[3]))
+                row = {}
+                for k in ("acc_final", "plasticity", "bwt"):
+                    d = [100 * (by[e][s][k] - by[3][s][k]) for s in common]
+                    m, lo, hi = boot_ci(d)
+                    row[k] = {"n": len(d), "mean_diff_pp": m, "ci95": [lo, hi], "p_signflip": signflip_p(d)}
+                res["paired_vs_3"][e] = row
+                ps[e] = row["acc_final"]["p_signflip"]
+            adj = holm(ps)
+            for e in res["paired_vs_3"]:
+                res["paired_vs_3"][e]["acc_final"]["p_holm"] = adj.get(e)
+        out[model] = res
+    return out
+
+
+def fig_epochs(F, ep):
+    if not ep:
+        return
+    plt = _plt()
+    fig, axes = plt.subplots(1, 3, figsize=(15, 3.8))
+    data = {}
+    for model, res in ep.items():
+        es = sorted(res["budgets"])
+        for ax, key, label in zip(axes, ("acc_final", "plasticity", "bwt"),
+                                  ("ACC (%)", "plasticity (%)", "BWT (pp)")):
+            m = [res["budgets"][e][key]["mean"] for e in es]
+            lo = [res["budgets"][e][key]["ci95"][0] for e in es]
+            hi = [res["budgets"][e][key]["ci95"][1] for e in es]
+            ax.plot(es, m, marker="o", color=MODEL_COLOR[model], label=C.MODELS[model].label)
+            ax.fill_between(es, lo, hi, color=MODEL_COLOR[model], alpha=0.15, lw=0)
+            ax.set_xticks([1, 2, 3, 5])
+            ax.set_xlabel("epochs per task")
+            ax.set_ylabel(label)
+            data.setdefault(model, {})[key] = {"epochs": es, "mean": m, "ci_low": lo, "ci_high": hi}
+    axes[0].legend(fontsize=7)
+    F.save(fig, "ext_epoch_budget", data,
+           "E3: all-linear LoRA r=16, fixed LR, 10 seeds: ACC, plasticity and BWT vs epochs per task "
+           "(mean and 95% bootstrap CI).")
+
+
 def fig_cost(F, rows):
     plt = _plt()
     by = {}
@@ -1326,6 +1386,9 @@ def main(argv=None):
     al_sum, al_paired = all_linear(rows)
     if stab:
         dump("ext_stability.json", stab)
+    ep = epoch_budget(rows)
+    if ep:
+        dump("ext_epoch_budget.json", ep)
     if al_sum:
         dump("ext_all_linear.json", {**al_sum, "paired_all_linear_minus_qv": al_paired,
                                      "selected_lr": [{**v, "model": m, "rank": r} for (m, r), v in
@@ -1341,7 +1404,7 @@ def main(argv=None):
                      (fig_orders, (F, rows, sel)), (fig_seeds, (F, rows)), (fig_loss_curves, (F, rows, root)),
                      (fig_v3_vs_v4, (F, v3, summary)), (fig_window_map, (F, wins)), (fig_paired_forest, (F, tests)),
                      (fig_bwt_components, (F, summary)), (fig_stability, (F, stab)),
-                     (fig_all_linear, (F, al_sum, rows)), (fig_cost, (F, rows))):
+                     (fig_all_linear, (F, al_sum, rows)), (fig_epochs, (F, ep)), (fig_cost, (F, rows))):
         try:
             fn(*args)
         except Exception as exc:  # noqa: BLE001 - one bad figure must not block the rest

@@ -169,7 +169,7 @@ def volume_pending(n) -> list:
             continue
         d = json.loads(_read(vol, e.path))
         spec = d["spec"]
-        if spec["kind"] not in ("main", "order", "stab", "main_al"):
+        if spec["kind"] not in ("main", "order", "stab", "main_al") and not spec["kind"].startswith("ep"):
             continue
         secs = JOB_SECONDS.get(f"{spec['model']}|{spec['split']}", 900) * 1.6
         rows.append({"job_id": job_id, "spec": spec, "priority": d["priority"], "est_usd": secs * RATE_S})

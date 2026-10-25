@@ -78,6 +78,12 @@ def stab_jobs(model: str, rank: int, selected_lr: float) -> list:
             for li, lr in enumerate((selected_lr, selected_lr / 2)) for s in C.STAB_SEEDS]
 
 
+def epoch_jobs(model: str, rank: int, lr: float, epochs, seeds) -> list:
+    """E3: all-linear LoRA at a fixed rank/LR with different epoch budgets (kind 'ep<E>_al')."""
+    return [Job(f"ep{e}_al", model, "lora", rank, lr, s, "O1", "official", priority=600 + i)
+            for i, s in enumerate(seeds) for e in epochs]
+
+
 def full_tune_jobs(model: str, lrs=C.FULL_LR_GRID, seeds=C.TUNE_SEEDS[:1]) -> list:
     return [Job("full_tune", model, "full", None, lr, s, "O1", "holdout", priority=400 + i)
             for i, (lr, s) in enumerate((lr, s) for s in seeds for lr in lrs)]

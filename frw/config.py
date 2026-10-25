@@ -85,6 +85,7 @@ ORDER_RANKS = (1, 4, 16, 64, 256, 1024)
 STAB_SEEDS = (2024, 3033, 4044, 5055, 6066)        # fresh seeds, never used for selection
 STAB_RANKS = (16, 64, 128, 256, 512, 1024)
 AL_RANKS = (4, 16, 64, 256)
+EPOCH_SEEDS = MAIN_SEEDS + STAB_SEEDS                # 10 seeds (pre-registered, PROTOCOL_V4_EXT.md E3)
 
 INTRUDER_K = 10
 INTRUDER_EPS = (0.5, 0.6, 0.7, 0.8, 0.9)

@@ -197,3 +197,33 @@ and the same five reported seeds as q/v, so the comparison is paired by seed.
 **Updated recommendation.** For sub-3B decoders on sequential classification, use **LoRA on all
 linear layers at r = 8–16 with a tuned LR (≈1e-4 for Llama, 1e-4–2e-4 for Qwen)**. Raising the
 rank does not reduce forgetting. If a high rank is used, halve the LR.
+
+### E3 — epoch budget (all-linear LoRA, r = 16, fixed LR 1e-4, 10 seeds)
+
+| Model | Epochs/task | ACC (%) | Plasticity (%) | BWT (pp) | ΔACC vs 3 epochs, paired (95% CI) | Holm p |
+|---|---|---|---|---|---|---|
+| Llama-3.2-1B | 1 | 81.1 ± 0.9 | 83.2 | −3.1 | −3.5 [−3.8, −3.2] | 0.006 |
+| Llama-3.2-1B | 2 | 83.3 ± 1.0 | 85.7 | −3.7 | −1.3 [−1.9, −0.8] | 0.008 |
+| Llama-3.2-1B | **3** | **84.6 ± 0.6** | 86.7 | −3.2 | — | — |
+| Llama-3.2-1B | 5 | 85.0 ± 0.5 | 87.4 | −3.7 | +0.4 [−0.0, +0.8] | 0.18 |
+| Qwen2.5-1.5B | 1 | 84.9 ± 1.3 | 86.8 | −2.8 | −2.0 [−2.8, −1.2] | 0.008 |
+| Qwen2.5-1.5B | **3** | **86.9 ± 0.7** | 88.5 | −2.4 | — | — |
+| Qwen2.5-1.5B | 5 | 86.7 ± 0.8 | 88.7 | −3.0 | −0.2 [−1.0, +0.6] | 0.70 |
+
+- **Fewer than 3 epochs is clearly worse.** The loss comes from learning less (plasticity −1 to
+  −3.5 pp), not from forgetting more. Both 1 and 2 epochs are significantly worse after Holm
+  correction.
+- **More than 3 epochs gives no significant gain** (Llama +0.4 pp, p = 0.18; Qwen −0.2 pp).
+- **Forgetting does not depend on training length in this range.** BWT stays between −2.4 and
+  −3.7 pp across budgets, and no paired BWT difference is significant. Forgetting here is set by
+  the task switch and the learning rate, not by how long each task trains.
+- **3 epochs per task is confirmed** as the budget for the future configuration.
+- **On seed count:** with 10 seeds this cohort reached Holm-adjusted significance (p ≈ 0.006),
+  which is impossible with 5 seeds. That supports the recommendation of ≥ 10 seeds for future
+  comparisons.
+
+### Final budget
+
+All work used October credit only. The pool total was $164.03; each account ended between
+$27.12 and $27.57 with $0 billed beyond the free credit. The study comprises 1,088 completed
+runs.

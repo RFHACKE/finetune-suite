@@ -67,3 +67,25 @@ together. The window for all-linear is expected at lower or equal ranks.
 | 4 | E2 Qwen2.5-1.5B |
 | 6 | E1 Qwen2.5-3B r = 512, 1024; E2 Llama-3.2-1B |
 | 5 | E1 Granite r = 256 (small remaining credit); also receives overflow |
+
+## E3 — Epoch budget (pre-registered 2026-10-25 ~10:50 UTC, before launch)
+
+**Why it matters.** Training length directly controls how far the adapter moves on each task, and
+therefore how much it forgets. v4 fixed 3 epochs per task without testing it. The future
+configuration is all-linear LoRA, so E3 is run in that configuration.
+
+**Design.** All-linear LoRA, r = 16, at each model's E2-selected LR (Llama-3.2-1B 1e-4,
+Qwen2.5-1.5B 1e-4). Epochs per task: Llama ∈ {1, 2, 3, 5}, Qwen2.5-1.5B ∈ {1, 3, 5} (a smaller
+grid to fit the remaining credit). Ten seeds {42, 123, 456, 789, 1024, 2024, 3033, 4044, 5055,
+6066}, order O1, official validation, no probes. The warmup + cosine schedule spans each run's own
+budget, and the LR is held fixed across budgets (stated as a limitation: a longer budget may prefer
+a lower LR).
+
+**Analysis.** Mean ACC / plasticity / BWT per epoch budget with 95% bootstrap CIs. Paired
+(same-seed) differences of each budget against 3 epochs, using an exact sign-flip test with Holm
+correction. With 10 seeds the smallest attainable p is 0.002.
+**Decision:** a budget is preferred over 3 epochs only if its paired ACC difference has a
+Holm-adjusted p < 0.05 and a positive CI.
+
+**Budget.** Admission cap raised to $28 per account (hard stop still $29 on real billing, limit
+$30); three workers per account to limit in-flight overshoot.
